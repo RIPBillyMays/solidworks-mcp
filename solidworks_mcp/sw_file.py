@@ -302,7 +302,7 @@ def rebuild_document(args: dict[str, Any]) -> dict[str, Any]:
     ["red", "green", "blue"],
 )
 def set_appearance(args: dict[str, Any]) -> dict[str, Any]:
-    from sw_core import as_list, enumerate_faces, get_bodies, safe
+    from .sw_core import as_list, enumerate_faces, get_bodies, safe
 
     _, doc = require_part()
     values = (

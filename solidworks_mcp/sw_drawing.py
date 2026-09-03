@@ -529,7 +529,7 @@ def _draw_in_view(doc: Any, parent_view: str | None, draw: Any) -> tuple[str, An
     if entity is None:
         raise RuntimeError("SOLIDWORKS did not draw the reference geometry in the view.")
     clear_selection(doc)
-    from sw_core import select_object
+    from .sw_core import select_object
 
     if not select_object(doc, entity, mark=0, append=False):
         raise RuntimeError("Could not select the reference geometry just drawn.")
@@ -557,7 +557,7 @@ def _draw_in_view(doc: Any, parent_view: str | None, draw: Any) -> tuple[str, An
     ["place_x_mm", "place_y_mm"],
 )
 def insert_section_view(args: dict[str, Any]) -> dict[str, Any]:
-    from sw_core import empty_variant
+    from .sw_core import empty_variant
 
     _, doc = require_drawing()
     parent = args.get("parent_view")
@@ -721,7 +721,7 @@ def create_drawing_sketch(args: dict[str, Any]) -> dict[str, Any]:
     ["name"],
 )
 def set_drawing_view(args: dict[str, Any]) -> dict[str, Any]:
-    from sw_core import double_array
+    from .sw_core import double_array
 
     _, doc = require_drawing()
     name = str(args["name"])
@@ -904,7 +904,7 @@ def _select_circular_edges(doc: Any, view: Any) -> int:
     view, so a tool that means "mark every hole here" has to build that
     selection itself.
     """
-    from sw_core import nothing
+    from .sw_core import nothing
 
     clear_selection(doc)
     count = 0
