@@ -36,6 +36,7 @@ from .sw_core import (
     active_document,
     as_list,
     byref_long,
+    call_versioned,
     clear_selection,
     document_info,
     document_type,
@@ -108,7 +109,7 @@ CENTER_MARK_STYLES = {"single": 2, "linear": 3, "circular": 4}
 _DRAWING_METHODS = (
     "NewSheet3", "SetupSheet5", "SetupSheet4", "ActivateSheet", "ActivateView",
     "CreateDrawViewFromModelView3", "Create3rdAngleViews2", "Create1stAngleViews2",
-    "CreateUnfoldedViewAt3", "CreateSectionViewAt5", "CreateDetailViewAt4",
+    "CreateUnfoldedViewAt3", "CreateSectionViewAt5", "CreateDetailViewAt4", "CreateDetailViewAt3",
     "InsertModelAnnotations3", "AutoDimension", "InsertCenterMark3", "InsertCenterLine2",
     "AutoInsertCenterMarks2", "SelectEntity",
     "GetSheetNames", "GetFirstView", "GetCurrentSheet",
@@ -632,7 +633,7 @@ def insert_detail_view(args: dict[str, Any]) -> dict[str, Any]:
             ),
         )
 
-    view = doc.CreateDetailViewAt4(
+    detail_args = (
         to_m(args["place_x_mm"]), to_m(args["place_y_mm"]), 0.0,
         1,  # swDetailCircleStyle_e: 1 = circle profile
         float(args.get("scale_numerator", 2)), float(args.get("scale_denominator", 1)),
@@ -641,6 +642,13 @@ def insert_detail_view(args: dict[str, Any]) -> dict[str, Any]:
         bool(args.get("full_outline", False)),
         bool(args.get("jagged_outline", False)),
         False, 0,
+    )
+    # CreateDetailViewAt3 (2016) stops after FullOutline: no jagged outline,
+    # no fixed-size circle, no border style.
+    view = call_versioned(
+        doc,
+        ("CreateDetailViewAt4", detail_args),
+        ("CreateDetailViewAt3", detail_args[:9]),
     )
     if view is None:
         return result(
