@@ -1206,6 +1206,7 @@ SELECTION_SCHEMA = {
         "sketch_points": {"type": "array", "items": {"type": "integer"}, "description": "Sketch point indices."},
         "sketch_name": {"type": "string", "description": "Which sketch sketch_segments/sketch_points refer to. Defaults to the open sketch."},
         "bodies": {"type": "array", "items": {"type": "integer"}, "description": "Solid-body indices."},
+        "surface_bodies": {"type": "array", "items": {"type": "integer", "minimum": 0}, "description": "Surface-body indices from list_surface_bodies; separate from solid-body indices."},
         "components": {"type": "array", "items": {"type": "string"}, "description": "Assembly component names."},
         "points": {
             "type": "array",
@@ -1407,6 +1408,15 @@ def apply_selection(doc: Any, spec: dict[str, Any] | None, mark: int = 0, append
             raise RuntimeError(f"Body index {index} is out of range (0..{len(bodies) - 1}).")
         if not select_body(doc, bodies[index], mark, True):
             raise RuntimeError(f"Could not select body {index}.")
+        count += 1
+
+    surface_bodies = get_bodies(doc, BODY_SHEET) if spec.get("surface_bodies") else []
+    for raw_index in spec.get("surface_bodies", []):
+        index = int(raw_index)
+        if not 0 <= index < len(surface_bodies):
+            raise RuntimeError(f"Surface-body index {index} is out of range (0..{len(surface_bodies) - 1}).")
+        if not select_body(doc, surface_bodies[index], mark, True):
+            raise RuntimeError(f"Could not select surface body {index}.")
         count += 1
 
     if spec.get("components"):

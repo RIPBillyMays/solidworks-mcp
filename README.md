@@ -6,10 +6,13 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-120 tools: sketching with real relations and driving dimensions, the solid
+142 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
 the model can see what it just built.
+
+覆盖范围包含 SolidWorks 本体与官方自带、随附模块，排除嘉立创等第三方插件。
+当前仍未全覆盖；功能域、完成判据和缺口记录见 [COVERAGE.md](COVERAGE.md)。
 
 A sibling server, [`autocad-mcp`](https://github.com/limuzi013/autocad-mcp),
 does the same for AutoCAD.
@@ -172,12 +175,35 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 | `combine_bodies` | 多实体并集、差集与交集；差集的第一个实体为保留的主体。 |
 | `delete_bodies` | 创建删除/保留实体特征。 |
 | `surface_extrude` / `planar_surface` | 从草图生成拉伸曲面或平面曲面。 |
+| `offset_surface` / `knit_surfaces` / `thicken_surface` | 偏移面、缝合曲面和曲面加厚；读取实际曲面或实体结果。 |
 | `list_surface_bodies` | 查询曲面体及其面积，面积单位为 mm²。 |
 | `create_helix` | 从圆草图按螺距和圈数生成螺旋线，读取实际螺距、圈数及高度。 |
 
 实体操作沿用 `selection`，例如 `{"selection": {"bodies": [0, 1]}}`。
 索引取自 `list_bodies`，几何变化后需重新查询。曲面体索引与实体索引独立，
-本批实体编辑工具只接受实体。
+曲面选择使用 `surface_bodies`，索引取自 `list_surface_bodies`。
+
+### 钣金与焊件
+
+| 工具 | 功能 |
+| --- | --- |
+| `sheet_metal_base_flange` | 创建基体法兰，设置板厚、折弯半径与 K 因子。 |
+| `list_sheet_metal_features` / `get_sheet_metal_parameters` / `set_sheet_metal_parameters` | 读取和修改钣金参数；默认操作原生模板参数，可指定实体钣金特征。 |
+| `set_flat_pattern` / `export_flat_pattern` | 展开、折叠与 DXF 导出；导出要求零件已保存。 |
+| `create_weldment` | 创建焊件特征。 |
+| `list_weldment_profiles` / `get_weldment_profile_configurations` | 查询本机轮廓与规格配置。 |
+| `insert_structural_member` | 按草图线段组、轮廓配置和角度创建结构构件。 |
+| `list_cut_list` / `update_cut_list` | 读取和更新切割清单，返回实体与解析属性。 |
+
+### 官方 Motion 算例
+
+`list_motion_studies`、`create_motion_study`、`activate_motion_study`、
+`duplicate_motion_study`、`delete_motion_study`、`set_motion_study_type`、
+`set_motion_study_timing`。
+
+时间单位为秒。零件与装配体均支持基础算例管理；工具读取实际支持的类型位掩码，
+无法使用的 Basic Motion 或 Motion Analysis 会返回失败，不自动加载模块。
+算例管理已验证，动力学求解、载荷、接触、结果曲线与动画输出仍待覆盖。
 
 ### 文档、配置、属性与方程
 

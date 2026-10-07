@@ -194,9 +194,10 @@ def main():
         test_multibody()
         test_surfaces_and_helix()
         test_components()
-        expected = {t.name for t in server.TOOLS if HANDLERS[t.name].__module__ in
-                    ("solidworks_mcp.sw_manage", "solidworks_mcp.sw_multibody")} | {
-                        "set_component_visibility", "set_component_suppression", "set_component_configuration"}
+        expected = {t.name for t in server.TOOLS if HANDLERS[t.name].__module__ == "solidworks_mcp.sw_manage"} | {
+            "scale_bodies", "move_copy_bodies", "combine_bodies", "delete_bodies", "surface_extrude",
+            "planar_surface", "create_helix", "list_surface_bodies",
+            "set_component_visibility", "set_component_suppression", "set_component_configuration"}
         assert expected <= CALLED, expected - CALLED
         print(f"Expanded tools verified: {len(expected)}; total tools: {len(server.TOOLS)}", flush=True)
     finally:

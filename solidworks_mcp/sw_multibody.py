@@ -16,7 +16,7 @@
 
 import math
 from .sw_core import (
-    BODY_SHEET, dispatch_array,
+    BODY_SHEET, SELECTION_SCHEMA, dispatch_array,
     feature_manager, feature_result, flag_methods, get_bodies, nothing,
     rename_feature, require_part, require_selection, result,
     select_sketch_for_feature, to_m, to_rad, tool, as_list, value,
@@ -215,4 +215,61 @@ def create_helix(args):
         payload["data"].update(pitch_mm=actual_pitch, revolutions=actual_turns, height_mm=height)
         if not (math.isclose(actual_pitch, pitch, rel_tol=1e-6) and math.isclose(actual_turns, turns, rel_tol=1e-6)):
             payload.update(ok=False, message="Helix feature exists, but pitch/revolution readback differs.")
+    return payload
+
+
+@tool("offset_surface", "Create an offset surface from selected solid-model faces; distance=0 copies the selected faces. Distance is mm.",
+      {"selection": SELECTION_SCHEMA, "distance_mm": {"type": "number", "minimum": 0}, "reverse": {"type": "boolean", "default": False}, "name": NAME}, ["selection", "distance_mm"])
+def offset_surface(args):
+    distance = float(args["distance_mm"])
+    if not math.isfinite(distance) or distance < 0:
+        raise RuntimeError("distance_mm must be finite and nonnegative.")
+    _, doc = require_part()
+    require_selection(doc, args["selection"])
+    before = _feature_names(doc)
+    sheets = len(get_bodies(doc, BODY_SHEET))
+    flag_methods(doc, "InsertOffsetSurface").InsertOffsetSurface(to_m(distance), bool(args.get("reverse", False)))
+    payload = _finish(doc, _feature_created_after(doc, before), args, "offset surface")
+    if payload["ok"] and len(get_bodies(doc, BODY_SHEET)) <= sheets:
+        payload.update(ok=False, message="Offset surface feature did not produce a surface body.")
+    return payload
+
+
+@tool("thicken_surface", "Thicken one surface into a solid. Select surface_bodies from list_surface_bodies or its feature; lengths are mm. both applies thickness on each side.",
+      {"selection": SELECTION_SCHEMA, "thickness_mm": {"type": "number", "exclusiveMinimum": 0},
+       "direction": {"type": "string", "enum": ["side_one", "side_two", "both"], "default": "side_one"},
+       "merge": {"type": "boolean", "default": True}, "name": NAME}, ["selection", "thickness_mm"])
+def thicken_surface(args):
+    thickness = _positive(args["thickness_mm"], "thickness_mm")
+    _, doc = require_part()
+    count = require_selection(doc, args["selection"], mark=1)
+    if count != 1:
+        raise RuntimeError("Select exactly one surface body or surface feature.")
+    before = len(get_bodies(doc))
+    manager = flag_methods(feature_manager(doc), "FeatureBossThicken")
+    feature = manager.FeatureBossThicken(to_m(thickness), {"side_one": 0, "side_two": 1, "both": 2}[args.get("direction", "side_one")],
+                                        0, False, bool(args.get("merge", True)), True, True)
+    payload = _finish(doc, feature, args, "surface thickening")
+    if payload["ok"] and len(get_bodies(doc)) <= before and not args.get("merge", True):
+        payload.update(ok=False, message="Thickening did not create a separate solid body.")
+    return payload
+
+
+@tool("knit_surfaces", "Knit at least two selected surface bodies/features, optionally forming a closed solid. Tolerance is mm; re-list surfaces after changes.",
+      {"selection": SELECTION_SCHEMA, "form_solid": {"type": "boolean", "default": False}, "merge_entities": {"type": "boolean", "default": True},
+       "tolerance_mm": {"type": "number", "minimum": 0.0001, "maximum": 0.1, "default": 0.001}, "name": NAME}, ["selection"])
+def knit_surfaces(args):
+    tolerance = float(args.get("tolerance_mm", 0.001))
+    if not math.isfinite(tolerance) or not 0.0001 <= tolerance <= 0.1:
+        raise RuntimeError("Knit tolerance must be between 0.0001 and 0.1 mm.")
+    _, doc = require_part()
+    count = require_selection(doc, args["selection"], mark=1)
+    if count < 2:
+        raise RuntimeError("Select at least two surface bodies or surface features.")
+    before = len(get_bodies(doc))
+    manager = flag_methods(feature_manager(doc), "InsertSewRefSurface")
+    feature = manager.InsertSewRefSurface(False, bool(args.get("form_solid", False)), bool(args.get("merge_entities", True)), to_m(tolerance), to_m(tolerance))
+    payload = _finish(doc, feature, args, "surface knit")
+    if payload["ok"] and args.get("form_solid", False) and len(get_bodies(doc)) <= before:
+        payload.update(ok=False, message="Knit feature did not form a closed solid.")
     return payload
