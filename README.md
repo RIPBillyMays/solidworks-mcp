@@ -6,7 +6,7 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-164 tools: sketching with real relations and driving dimensions, the solid
+169 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
 the model can see what it just built.
@@ -196,6 +196,7 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 | `combine_bodies` | 多实体并集、差集与交集；差集的第一个实体为保留的主体。 |
 | `delete_bodies` | 创建删除/保留实体特征。 |
 | `mid_surface` / `get_mid_surface_data` | 原生自动中面与只读检查；读取面配对、厚度、面积、位置和缝合结果。非零位置未生效时返回失败。 |
+| `preview_surface_trim` / `trim_surface` / `get_surface_trim_data` | 标准与相互曲面修剪；预览区域面积、边界与选择点，按区域索引保留或删除，并读取原生特征数据。 |
 | `surface_sweep` | 开口/闭合草图或圆截面扫描；导引线、法向控制、扭转、第一/第二/双向扫描，读回原生参数。要求 SW 2018+。 |
 | `delete_surface_holes` | 删除选定曲面孔边界，保留未选孔；支持单孔与多孔。 |
 | `surface_extrude` / `planar_surface` | 从草图生成拉伸曲面或平面曲面。 |
@@ -206,6 +207,13 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 实体操作沿用 `selection`，例如 `{"selection": {"bodies": [0, 1]}}`。
 索引取自 `list_bodies`，几何变化后需重新查询。曲面体索引与实体索引独立，
 曲面选择使用 `surface_bodies`，索引取自 `list_surface_bodies`。
+
+修剪先调用 `preview_surface_trim`，再把返回的区域索引传给 `trim_surface`。
+标准修剪指定一个 `trim_selection`；相互修剪设置 `mode=mutual`，只指定目标曲面体。
+区域索引按目标顺序、包围盒和面积排序，几何变化后必须重新预览。
+复杂区域可用 `picked_points_mm` 指定实际落在区域上的选择点。
+相互修剪在本机即使 `knit=false` 仍会合并相接曲面；工具返回失败并保留特征信息。
+实体形成选项、更多复杂曲面组合和旧版软件尚待覆盖或实测。
 
 ### 钣金与焊件
 
@@ -234,12 +242,16 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 | 工具 | 功能 |
 | --- | --- |
 | `list_open_documents` / `activate_document` / `close_document` | 查询、切换和关闭已有文档；关闭有未保存修改的文档需显式传入 `discard_changes=true`。 |
+| `list_solidworks_sessions` / `select_solidworks_session` | 查询已经运行的实例及其文档，按 `process_id` 明确选择后续 MCP 调用连接的实例。 |
 | `list_configurations` / `create_configuration` / `activate_configuration` / `delete_configuration` | 查询、创建、激活和删除配置；不能删除活动配置。 |
 | `list_custom_properties` / `get_custom_property` / `set_custom_property` / `delete_custom_property` | 查询和编辑文档级或配置级自定义属性，包括原始值、解析值与类型。 |
 | `list_equations` / `add_equation` / `set_equation` / `delete_equation` / `evaluate_equations` | 查询和编辑方程与全局变量，使用 SOLIDWORKS 方程语法，例如 `"Width" = 25mm`。 |
 | `list_materials` | 搜索实际配置的材质库，返回可传给 `set_material` 的准确名称与数据库路径。 |
 
 `configuration` 为空时操作文档级属性，非空时必须是已存在的配置名称。
+实例选择只作用于当前 MCP 服务进程；`process_id=0` 恢复默认 COM 注册。
+可通过 `SW_MCP_SESSION_PID` 指定启动时连接的已有实例；显式工具选择优先。
+实例退出后调用会失败，不会自动切换到另一个实例。查询可读不代表建模命令正常。
 方程里的单位由 SOLIDWORKS 语法解释，应明确写出 `mm` 等单位；方程索引在删除后变化。
 
 ### Engineering drawings

@@ -28,6 +28,162 @@ BODY_SELECTION = {"type": "object", "properties": {"bodies": {"type": "array", "
 NAME = {"type": "string"}
 NUM = {"type": "number", "default": 0}
 
+TRIM_PROPERTIES = {
+    "surface_body_indices": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 1, "uniqueItems": True},
+    "mode": {"type": "string", "enum": ["standard", "mutual"], "default": "standard"},
+    "trim_selection": SELECTION_SCHEMA,
+    "split_system": {"type": "boolean", "default": True},
+    "linear_extension": {"type": "boolean", "default": False},
+    "remove_picked": {"type": "boolean", "default": False},
+}
+
+
+def _trim_body_info(body):
+    faces = as_list(value(body, "GetFaces"))
+    point = next((point for face in faces if (point := _face_point(face)) is not None), None)
+    return {"area_mm2": sum(float(value(face, "GetArea")) for face in faces) * 1e6,
+            "face_count": len(faces), "box_mm": [to_mm(v) for v in value(body, "GetBodyBox")],
+            "selection_point_mm": mm_point(point) if point is not None else None}
+
+
+def _prepare_surface_trim(doc, args):
+    indices = args["surface_body_indices"]
+    mode = args.get("mode", "standard")
+    if mode not in ("standard", "mutual"):
+        raise RuntimeError("mode must be standard or mutual.")
+    bodies = get_bodies(doc, BODY_SHEET)
+    if not indices or len(set(indices)) != len(indices) or any(isinstance(i, bool) or not isinstance(i, int) or i < 0 or i >= len(bodies) for i in indices):
+        raise RuntimeError("Specify distinct surface body indices from list_surface_bodies.")
+    selection = args.get("trim_selection", {})
+    if mode == "mutual":
+        if len(indices) < 2 or selection:
+            raise RuntimeError("Mutual trimming needs at least two surface bodies and no separate trim_selection.")
+        clear_selection(doc)
+        ext = flag_methods(value(doc, "Extension"), "SelectByID2")
+        for index in indices:
+            # Re-resolve originals by name: Body2.Select2 can block after a mutual preview.
+            point = _trim_body_info(bodies[index])["selection_point_mm"]
+            if point is None or not ext.SelectByID2(str(value(bodies[index], "Name")), "SURFACEBODY", *[to_m(v) for v in point], True, 0, nothing(), 0):
+                raise RuntimeError("Cannot select an original surface for mutual trimming.")
+    else:
+        if not selection or set(selection) - {"planes", "sketches", "surface_bodies", "surface_faces"}:
+            raise RuntimeError("Standard trimming needs one plane, sketch, surface body or surface face as trim_selection.")
+        if set(selection.get("surface_bodies", [])) & set(indices):
+            raise RuntimeError("A trimming surface cannot also be a target surface.")
+        if require_selection(doc, selection) != 1:
+            raise RuntimeError("Standard trimming needs exactly one trimming tool.")
+    fm = flag_methods(feature_manager(doc), "PreTrimSurface", "GetPreTrimmedBodies", "PostTrimSurface")
+    if not fm.PreTrimSurface(mode == "mutual", bool(args.get("split_system", True)),
+                             bool(args.get("linear_extension", False)), bool(args.get("remove_picked", False))):
+        raise RuntimeError("SolidWorks rejected the surface trimming setup.")
+    if safe(fm, "SolidForTrim") is not None:
+        fm.SolidForTrim = False
+    pieces = []
+    for index in indices:
+        regions = as_list(fm.GetPreTrimmedBodies(bodies[index]))
+        if not regions:
+            raise RuntimeError(f"No trim regions were generated for surface body {index}.")
+        ordered = sorted(((body, _trim_body_info(body)) for body in regions),
+                         key=lambda item: (item[1]["box_mm"], item[1]["area_mm2"]))
+        for body, info in ordered:
+            pieces.append((body, {**info, "index": len(pieces), "surface_body_index": index}))
+    return fm, bodies, pieces
+
+
+@tool("preview_surface_trim", "Generate temporary trim regions without creating a feature. Standard mode needs one trim_selection; mutual mode uses only surface_body_indices. Region indices are sorted by target order and geometric bounds. Regenerate the preview after changing geometry. Distances are mm and areas mm2.",
+      TRIM_PROPERTIES, ["surface_body_indices"])
+def preview_surface_trim(args):
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    try:
+        _, _, pieces = _prepare_surface_trim(doc, args)
+        return result(True, "Read temporary surface trimming regions.", regions=[info for _, info in pieces])
+    finally:
+        clear_selection(doc)
+
+
+def _surface_trim_info(doc, feature):
+    if feature is None or safe(feature, "GetTypeName2") != "TrimRefSurface":
+        raise RuntimeError("Specify an existing surface trim feature.")
+    definition = flag_methods(value(feature, "GetDefinition"), "AccessSelections")
+    if not definition.AccessSelections(doc, nothing()):
+        raise RuntimeError("Cannot access surface trim feature selections.")
+    try:
+        return {"type": int(value(definition, "GetType")),
+                "trim_tool_count": int(value(definition, "GetTrimToolsCount")),
+                "pieces_to_keep_count": int(value(definition, "GetPiecesToKeepCount"))}
+    finally:
+        value(definition, "ReleaseSelectionAccess")
+
+
+@tool("get_surface_trim_data", "Read native type, trimming tool count and kept-piece count of an existing surface trim feature.",
+      {"name": NAME}, ["name"])
+def get_surface_trim_data(args):
+    _, doc = require_part()
+    return result(True, "Read surface trim feature data.", trim=_surface_trim_info(doc, find_feature(doc, args["name"])))
+
+
+@tool("trim_surface", "Create a standard or mutual surface trim from preview region indices. remove_picked=false keeps selected regions; true removes them. Selection points are sent to native ISelectData, not only body pointers. Optional picked_points_mm overrides preview points in region_indices order. Rebuild, native definition and total remaining sheet area are verified; failed verification retains the created feature for inspection.",
+      {**TRIM_PROPERTIES, "region_indices": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 1, "uniqueItems": True},
+       "picked_points_mm": {"type": "array", "items": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}},
+       "knit": {"type": "boolean", "default": False}, "name": NAME}, ["surface_body_indices", "region_indices"])
+def trim_surface(args):
+    selected = args["region_indices"]
+    if not selected or len(set(selected)) != len(selected) or any(isinstance(i, bool) or not isinstance(i, int) or i < 0 for i in selected):
+        raise RuntimeError("Specify distinct non-negative region indices from preview_surface_trim.")
+    points = args.get("picked_points_mm")
+    if points is not None and (len(points) != len(selected) or any(len(p) != 3 or not all(math.isfinite(float(v)) for v in p) for p in points)):
+        raise RuntimeError("picked_points_mm needs one finite XYZ point per selected region.")
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    try:
+        fm, bodies, pieces = _prepare_surface_trim(doc, args)
+        if any(i >= len(pieces) for i in selected):
+            raise RuntimeError("A region index is out of range. Regenerate preview_surface_trim.")
+        selected_set = set(selected)
+        kept = [info for _, info in pieces if (info["index"] not in selected_set) == bool(args.get("remove_picked", False))]
+        if not kept:
+            raise RuntimeError("The trimming selection would remove every target region.")
+        sm = flag_methods(value(doc, "SelectionManager"), "CreateSelectData")
+        for order, index in enumerate(selected):
+            body, info = pieces[index]
+            point = points[order] if points is not None else info["selection_point_mm"]
+            if point is None:
+                raise RuntimeError("Cannot find a selection point for this region; provide picked_points_mm.")
+            point_m = [to_m(v) for v in point]
+            faces = as_list(value(body, "GetFaces"))
+            if not any(math.dist(point_m, flag_methods(face, "GetClosestPointOn").GetClosestPointOn(*point_m)[:3]) < 1e-8 for face in faces):
+                raise RuntimeError("The selected point does not lie on its requested trim region.")
+            data = value(sm, "CreateSelectData")
+            data.Mark = 0
+            data.X, data.Y, data.Z = point_m
+            if not flag_methods(body, "Select2").Select2(True, data):
+                raise RuntimeError("Cannot select the requested temporary trim region.")
+        expected_regions = kept + [_trim_body_info(body) for i, body in enumerate(bodies) if i not in args["surface_body_indices"]]
+        expected_area = sum(info["area_mm2"] for info in expected_regions)
+        expected_box = [min(info["box_mm"][i] for info in expected_regions) if i < 3 else max(info["box_mm"][i] for info in expected_regions) for i in range(6)]
+        feature = fm.PostTrimSurface(bool(args.get("knit", False)))
+        payload = _finish(doc, feature, args, "surface trim", regions=[info for _, info in pieces], kept_region_indices=[info["index"] for info in kept])
+        if payload["ok"]:
+            try:
+                info = _surface_trim_info(doc, feature)
+                actual_regions = [_trim_body_info(body) for body in get_bodies(doc, BODY_SHEET)]
+                actual_area = sum(region["area_mm2"] for region in actual_regions)
+                actual_box = [min(region["box_mm"][i] for region in actual_regions) if i < 3 else max(region["box_mm"][i] for region in actual_regions) for i in range(6)] if actual_regions else None
+                payload["data"].update(trim=info, expected_sheet_area_mm2=expected_area, actual_sheet_area_mm2=actual_area,
+                                      expected_sheet_box_mm=expected_box, actual_sheet_box_mm=actual_box,
+                                      sheet_body_count=len(actual_regions), knit_requested=bool(args.get("knit", False)))
+                if info["type"] != (1 if args.get("mode", "standard") == "mutual" else 0) or not math.isclose(actual_area, expected_area, rel_tol=1e-6, abs_tol=1e-5) or actual_box is None or not all(math.isclose(a, b, abs_tol=1e-5) for a, b in zip(actual_box, expected_box)):
+                    payload.update(ok=False, message="Surface trim geometry or native type differs from the requested regions.")
+                minimum_separate = len({region["surface_body_index"] for region in kept}) + len(bodies) - len(args["surface_body_indices"])
+                if not args.get("knit", False) and len(actual_regions) < minimum_separate:
+                    payload.update(ok=False, message="SolidWorks joined distinct source sheets despite knit=false; the created feature is retained for inspection.")
+            except Exception as exc:
+                payload.update(ok=False, message=f"Created surface trim feature but could not verify its native result: {exc}")
+        return payload
+    finally:
+        clear_selection(doc)
+
 
 def _positive(raw, label):
     number = float(raw)

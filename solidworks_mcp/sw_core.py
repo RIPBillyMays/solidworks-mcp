@@ -484,12 +484,58 @@ def as_list(com_array: Any) -> list[Any]:
 # --------------------------------------------------------------------------
 
 
+_SESSION_PID: int | None = None
+
+
+def selected_session_pid() -> int:
+    if _SESSION_PID is not None:
+        return _SESSION_PID
+    raw = os.environ.get("SW_MCP_SESSION_PID", "0")
+    try:
+        pid = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("SW_MCP_SESSION_PID must be a non-negative process ID.") from exc
+    if pid < 0:
+        raise RuntimeError("SW_MCP_SESSION_PID must be a non-negative process ID.")
+    return pid
+
+
+def session_monikers() -> list[tuple[int, Any]]:
+    pythoncom.CoInitialize()
+    rot = pythoncom.GetRunningObjectTable()
+    context = pythoncom.CreateBindCtx(0)
+    sessions = []
+    for moniker in rot:
+        try:
+            name = moniker.GetDisplayName(context, None)
+        except pythoncom.com_error:
+            continue
+        prefix = "SolidWorks_PID_"
+        if name.startswith(prefix) and name[len(prefix):].isdigit():
+            sessions.append((int(name[len(prefix):]), moniker))
+    return sorted(sessions, key=lambda item: item[0])
+
+
+def session_app(pid: int) -> Any:
+    pythoncom.CoInitialize()
+    if pid == 0:
+        return flag_methods(win32com.client.GetActiveObject("SldWorks.Application"), *_APP_METHODS)
+    for candidate, moniker in session_monikers():
+        if candidate == pid:
+            dispatch = pythoncom.GetRunningObjectTable().GetObject(moniker).QueryInterface(pythoncom.IID_IDispatch)
+            return flag_methods(win32com.client.Dispatch(dispatch), *_APP_METHODS)
+    raise RuntimeError(f"SolidWorks session {pid} is no longer registered. List sessions and select an existing process ID.")
+
+
 def running_app() -> Any:
     """Attach only to an already-running SOLIDWORKS session; never start one."""
     pythoncom.CoInitialize()
+    pid = selected_session_pid()
     try:
-        app = win32com.client.GetActiveObject("SldWorks.Application")
+        app = session_app(pid)
     except Exception as exc:
+        if pid:
+            raise RuntimeError(f"Cannot attach to selected SolidWorks session {pid}; no other session was substituted.") from exc
         raise RuntimeError(
             "No running SOLIDWORKS session is available. Open SOLIDWORKS and finish any modal dialogs first."
         ) from exc

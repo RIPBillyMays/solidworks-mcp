@@ -41,6 +41,13 @@ async def protocol(install, expected, catalog, scratch):
                 if not payload["ok"]:
                     raise RuntimeError(f"Installed MCP call failed: {name}: {payload}")
                 return payload.get("data", {})
+            connections = await call("list_solidworks_sessions")
+            attached = connections["attached_process_id"]
+            if attached is None:
+                raise RuntimeError("Cannot identify the installed MCP SolidWorks connection.")
+            selected = await call("select_solidworks_session", {"process_id": attached})
+            if selected["attached_process_id"] != attached:
+                raise RuntimeError("Installed MCP instance selection differs.")
             initial = await call("list_open_documents")
             original = initial["active_title"]
             title = None
@@ -146,6 +153,25 @@ async def protocol(install, expected, catalog, scratch):
                         raise RuntimeError("Installed MCP midsurface placement differs.")
                     if (await call("get_mid_surface_data", {"name": "InstalledMid"}))["midsurface"] != middle:
                         raise RuntimeError("Installed MCP read-only midsurface inspection differs.")
+                    await call("create_sketch", {"plane": "front", "name": "InstalledTrimProfile"})
+                    await call("draw_rectangle", {"x1_mm": 400, "y1_mm": 400, "x2_mm": 410, "y2_mm": 410})
+                    await call("close_sketch")
+                    await call("planar_surface", {"sketch_name": "InstalledTrimProfile", "name": "InstalledTrimSource"})
+                    bodies = (await call("list_surface_bodies"))["surface_bodies"]
+                    source = next(body["index"] for body in bodies if body["name"] == "InstalledTrimSource")
+                    await call("create_plane", {"mode": "offset", "selection": {"planes": ["right"]}, "distance_mm": 404, "name": "InstalledKnife"})
+                    trim_args = {"surface_body_indices": [source], "trim_selection": {"planes": ["InstalledKnife"]}}
+                    before = await call("list_features")
+                    regions = (await call("preview_surface_trim", trim_args))["regions"]
+                    if before != await call("list_features") or [round(r["area_mm2"]) for r in regions] != [40, 60]:
+                        raise RuntimeError("Installed MCP trim preview changed features or returned wrong regions.")
+                    trimmed = await call("trim_surface", {**trim_args, "region_indices": [0], "name": "InstalledTrim"})
+                    bodies = (await call("list_surface_bodies"))["surface_bodies"]
+                    actual = next(body for body in bodies if body["name"] == "InstalledTrim")
+                    if not math.isclose(actual["area_mm2"], 40, abs_tol=1e-7):
+                        raise RuntimeError("Installed MCP trim retained the wrong sheet area.")
+                    if (await call("get_surface_trim_data", {"name": "InstalledTrim"}))["trim"] != trimmed["trim"]:
+                        raise RuntimeError("Installed MCP trim definition readback differs.")
                 await call("list_reference_points")
                 systems = await call("list_coordinate_systems")
                 if scratch and systems["coordinate_systems"][0]["origin_mm"] != [2, 3, 4]:

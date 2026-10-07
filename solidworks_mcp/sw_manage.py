@@ -20,6 +20,7 @@ import xml.etree.ElementTree as ET
 
 import pythoncom
 import win32com.client
+from . import sw_core
 
 from .sw_core import (
     active_document, as_list, byref_long, document_info, document_type,
@@ -30,6 +31,45 @@ from .sw_core import (
 NAME = {"type": "string", "minLength": 1}
 CONFIG = {"type": "string", "default": "", "description": "Empty means document-level properties; otherwise an existing configuration name."}
 PROPERTY_TYPES = {"text": 30, "number": 3, "date": 64, "yes_or_no": 11}
+
+
+@tool("list_solidworks_sessions", "Read registered, already-running SolidWorks instances and their documents. Readability does not imply that modeling commands are healthy. Never starts an application.")
+def list_solidworks_sessions(args):
+    configured = sw_core.selected_session_pid()
+    current = None
+    try:
+        current = int(value(flag_methods(running_app(), "GetProcessID"), "GetProcessID"))
+    except Exception:
+        pass
+    entries = []
+    for pid, _ in sw_core.session_monikers():
+        entry = {"process_id": pid, "selected": pid == current}
+        try:
+            app = sw_core.session_app(pid)
+            active = app.ActiveDoc
+            entry.update(readable=True, version=str(value(app, "RevisionNumber")),
+                         documents=[document_info(doc) for doc in as_list(value(app, "GetDocuments"))],
+                         active_title=str(value(active, "GetTitle")) if active is not None else None)
+        except Exception as exc:
+            entry.update(readable=False, error=str(exc))
+        entries.append(entry)
+    return result(True, "Read registered SolidWorks sessions.", sessions=entries,
+                  configured_process_id=configured, attached_process_id=current)
+
+
+@tool("select_solidworks_session", "Route subsequent tools in this MCP server to an already-running SolidWorks process. process_id=0 restores the default COM registration. Does not activate windows, move documents, launch or terminate applications. If a selected process exits, calls fail rather than silently switching to another document session.",
+      {"process_id": {"type": "integer", "minimum": 0}}, ["process_id"])
+def select_solidworks_session(args):
+    pid = args["process_id"]
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid < 0:
+        raise RuntimeError("process_id must be a non-negative integer.")
+    app = flag_methods(sw_core.session_app(pid), "GetProcessID")
+    attached = int(value(app, "GetProcessID"))
+    if pid and attached != pid:
+        raise RuntimeError("The registered SolidWorks session does not match the requested process ID.")
+    sw_core._SESSION_PID = pid
+    return result(True, "Selected SolidWorks connection for this MCP server.",
+                  configured_process_id=pid, attached_process_id=attached)
 
 
 def _nonempty(raw: Any, label: str) -> str:
