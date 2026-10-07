@@ -100,6 +100,24 @@ async def protocol(install, expected, catalog, scratch):
                     patch = next(face for face in faces["faces"] if math.isclose(face["area_mm2"], 50, rel_tol=1e-7))
                     if not math.isclose(abs(patch["normal"][2]), 0.5, abs_tol=1e-6):
                         raise RuntimeError("Installed MCP ruled-surface taper inclination differs.")
+                    await call("create_sketch", {"plane": "front", "name": "InstalledSelectiveHoles"})
+                    await call("draw_rectangle", {"x1_mm": 90, "y1_mm": 90, "x2_mm": 100, "y2_mm": 100})
+                    for x in (93, 97):
+                        await call("draw_circle", {"x_mm": x, "y_mm": 95, "radius_mm": 1})
+                    await call("close_sketch")
+                    await call("planar_surface", {"sketch_name": "InstalledSelectiveHoles"})
+                    faces = (await call("list_faces", {"body_type": "surface"}))["faces"]
+                    hole_face = next(face for face in faces if face["point_mm"][0] >= 90)
+                    edges = (await call("list_edges", {"body_type": "surface"}))["edges"]
+                    holes = [edge["index"] for edge in edges
+                             if edge["body_index"] == hole_face["body_index"] and edge["curve_type"] == "circle"]
+                    if len(holes) != 2:
+                        raise RuntimeError("Installed MCP hole fixture topology differs.")
+                    await call("delete_surface_holes", {"selection": {"surface_edges": [holes[0]]}})
+                    faces = (await call("list_faces", {"body_type": "surface"}))["faces"]
+                    hole_face = next(face for face in faces if face["point_mm"][0] >= 90)
+                    if not math.isclose(hole_face["area_mm2"], 100 - math.pi, rel_tol=1e-7):
+                        raise RuntimeError("Installed MCP selective hole removal changed an unselected hole.")
                 await call("list_reference_points")
                 systems = await call("list_coordinate_systems")
                 if scratch and systems["coordinate_systems"][0]["origin_mm"] != [2, 3, 4]:

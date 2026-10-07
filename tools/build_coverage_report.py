@@ -30,7 +30,7 @@ FEATURE_TOOLS = {
     "swFmAbsoluteView": ["insert_model_view"], "swFmDetailView": ["insert_detail_view"],
     "swFmSectionPartView": ["insert_section_view"], "swFmSectionAssemView": ["insert_section_view"],
     "swFmUnfoldedView": ["insert_projected_view"], "swFmRefPlane": ["create_plane"],
-    "swFmRefAxis": ["create_axis"], "swFmRefSurface": ["surface_extrude", "surface_revolve", "surface_loft", "planar_surface", "offset_surface", "knit_surfaces", "extend_surface", "untrim_surface", "fill_surface", "ruled_surface"],
+    "swFmRefAxis": ["create_axis"], "swFmRefSurface": ["surface_extrude", "surface_revolve", "surface_loft", "planar_surface", "offset_surface", "knit_surfaces", "extend_surface", "untrim_surface", "fill_surface", "ruled_surface", "delete_surface_holes"],
     "swFmProfileFeature": ["create_sketch"], "swFmWeldMemberFeat": ["insert_structural_member"],
     "swFmCoordinateSystem": ["create_coordinate_system", "list_coordinate_systems"],
     "swFmRefCurve": ["create_curve_through_points", "get_curve_points", "set_curve_points", "composite_curve"],

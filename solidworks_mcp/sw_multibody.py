@@ -379,6 +379,28 @@ def _surface_boundary_selection(selection):
             raise RuntimeError("Surface topology indices must be distinct nonnegative integers.")
 
 
+@tool("delete_surface_holes", "Remove selected hole boundaries from surface bodies. Select surface_edges from list_edges(body_type=surface); unselected holes are preserved. Re-list topology afterwards.",
+      {"selection": SELECTION_SCHEMA, "name": NAME}, ["selection"])
+def delete_surface_holes(args):
+    selection = args["selection"]
+    _surface_boundary_selection(selection)
+    if set(selection) != {"surface_edges"}:
+        raise RuntimeError("Surface hole removal accepts only surface_edges.")
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    require_selection(doc, selection)
+    manager = flag_methods(feature_manager(doc), "InsertDeleteHoleForSurface")
+    try:
+        create = manager.InsertDeleteHoleForSurface
+    except AttributeError:
+        before = _feature_names(doc)
+        flag_methods(doc, "InsertDeleteHole").InsertDeleteHole()
+        feature = _feature_created_after(doc, before)
+    else:
+        feature = create()
+    return _finish(doc, feature, args, "surface hole removal")
+
+
 @tool("extend_surface", "Extend selected surface faces (all boundary edges) or individual surface edges. Distance is mm; up_to_point requires a selected point and up_to_surface requires a solid face. Re-list surface topology afterwards.",
       {"selection": SELECTION_SCHEMA, "linear": {"type": "boolean", "default": False},
        "end_condition": {"type": "string", "enum": ["distance", "up_to_point", "up_to_surface"], "default": "distance"},
