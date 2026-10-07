@@ -467,6 +467,117 @@ def _selected_objects(doc, selection, mark=0):
     return [manager.GetSelectedObject6(i, mark) for i in range(1, manager.GetSelectedObjectCount2(mark) + 1)]
 
 
+@tool("surface_sweep", "Sweep an open/closed sketch profile or a numeric circular profile along a path sketch. Supports guide sketches, follow-path/keep-normal/constant-twist control and one/both directions. Angles are degrees and diameter is mm. Requires the modern surface-sweep definition API (SOLIDWORKS 2018+). Native settings are read back before confirming success.",
+      {"profile_sketch": NAME, "path_sketch": NAME,
+       "circular_diameter_mm": {"type": "number", "exclusiveMinimum": 0},
+       "guide_sketches": {"type": "array", "items": NAME, "uniqueItems": True},
+       "twist_control": {"type": "string", "enum": ["follow_path", "keep_normal", "constant_twist", "first_guide", "two_guides"], "default": "follow_path"},
+       "twist_angle_deg": NUM, "second_twist_angle_deg": NUM,
+       "reverse_twist": {"type": "boolean", "default": False}, "reverse_second_twist": {"type": "boolean", "default": False},
+       "direction": {"type": "string", "enum": ["first", "both", "second"], "default": "first"},
+       "keep_tangency": {"type": "boolean", "default": False},
+       "advanced_smoothing": {"type": "boolean", "default": False},
+       "merge_smooth_faces": {"type": "boolean", "default": False}, "name": NAME}, ["path_sketch"])
+def surface_sweep(args):
+    profile, path = args.get("profile_sketch"), args["path_sketch"]
+    circular = "circular_diameter_mm" in args
+    diameter = _positive(args["circular_diameter_mm"], "circular_diameter_mm") if circular else 0
+    if not isinstance(path, str) or not path.strip() or (circular and profile) or (not circular and (not isinstance(profile, str) or not profile.strip())):
+        raise RuntimeError("Provide a path sketch and exactly one sketch or circular profile.")
+    guides = args.get("guide_sketches", [])
+    if not isinstance(guides, list) or any(not isinstance(g, str) or not g.strip() for g in guides) or len(set(guides)) != len(guides):
+        raise RuntimeError("Guide sketches must be distinct nonempty names.")
+    if profile == path or any(g in (profile, path) for g in guides):
+        raise RuntimeError("Profile, path and guide sketches must be distinct.")
+    controls = {"follow_path": 0, "keep_normal": 1, "constant_twist": 8, "first_guide": 2, "two_guides": 3}
+    directions = {"first": 0, "both": 1, "second": 2}
+    mode, direction = args.get("twist_control", "follow_path"), args.get("direction", "first")
+    angle, second = float(args.get("twist_angle_deg", 0)), float(args.get("second_twist_angle_deg", 0))
+    reverse, reverse_second = bool(args.get("reverse_twist", False)), bool(args.get("reverse_second_twist", False))
+    if mode not in controls or direction not in directions or not all(math.isfinite(a) and a >= 0 for a in (angle, second)):
+        raise RuntimeError("Invalid sweep control, direction or nonnegative twist angle.")
+    if (angle or second or reverse or reverse_second) and mode != "constant_twist":
+        raise RuntimeError("Twist angles and reversals require constant_twist control.")
+    if (second or reverse_second) and direction != "both":
+        raise RuntimeError("Second twist settings require bidirectional sweeping.")
+    if (direction == "both" and guides) or (mode == "first_guide" and len(guides) < 1) or (mode == "two_guides" and len(guides) < 2):
+        raise RuntimeError("Guide control requires at least one/two guide sketches; bidirectional sweeps do not support guides.")
+    if circular and (guides or mode != "follow_path" or direction != "first"):
+        raise RuntimeError("Circular profiles support follow_path control without guides or bidirectional options.")
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    clear_selection(doc)
+    if profile:
+        require_selection(doc, {"sketches": [profile]}, mark=1, append=True)
+    require_selection(doc, {"sketches": [path]}, mark=4, append=True)
+    if guides:
+        require_selection(doc, {"sketches": guides}, mark=2, append=True)
+    manager = flag_methods(feature_manager(doc), "CreateDefinition", "CreateFeature")
+    data = manager.CreateDefinition(62)  # swFmRefSurface initializes ISweepFeatureData.
+    if data is None:
+        raise RuntimeError("This SOLIDWORKS build cannot create a modern surface-sweep definition.")
+    data = flag_methods(data, "SetTwistAngle", "SetD2TwistAngle")
+    settings = {"TwistControlType": controls[mode], "CircularProfile": circular,
+                "Direction": directions[direction], "MaintainTangency": bool(args.get("keep_tangency", False)),
+                "AdvancedSmoothing": bool(args.get("advanced_smoothing", False)),
+                "MergeSmoothFaces": bool(args.get("merge_smooth_faces", False))}
+    if circular:
+        settings["CircularProfileDiameter"] = to_m(diameter)
+    if mode == "constant_twist":
+        settings["AlignWithEndFaces"] = False
+        if direction in {"both", "second"}:
+            settings["D2ReverseTwistDir"] = reverse_second if direction == "both" else reverse
+    for key, expected in settings.items():
+        setattr(data, key, expected)
+    def set_twist(definition):
+        definition.SetTwistAngle(0 if direction == "second" else to_rad(-angle if reverse else angle))
+        if direction in {"both", "second"}:
+            definition.SetD2TwistAngle(to_rad(second if direction == "both" else angle))
+            definition.D2ReverseTwistDir = reverse_second if direction == "both" else reverse
+    if mode == "constant_twist":
+        set_twist(data)
+    feature = manager.CreateFeature(data)
+    edit_applied = True
+    if feature is not None and (reverse or reverse_second):
+        # Negative twist is stored by CreateFeature but initially yields positive
+        # geometry on the tested build. ModifyDefinition rebuilds the signed twist.
+        edit = flag_methods(value(feature, "GetDefinition"), "AccessSelections", "SetTwistAngle", "SetD2TwistAngle", "ReleaseSelectionAccess")
+        if edit.AccessSelections(doc, nothing()):
+            try:
+                set_twist(edit)
+                edit_applied = bool(flag_methods(feature, "ModifyDefinition").ModifyDefinition(edit, doc, nothing()))
+            finally:
+                edit.ReleaseSelectionAccess()
+        else:
+            edit_applied = False
+    payload = _finish(doc, feature, args, "surface sweep")
+    if not edit_applied:
+        payload.update(ok=False, message="Surface sweep was created, but signed twist geometry could not be rebuilt.")
+    if payload["ok"]:
+        actual = value(feature, "GetDefinition")
+        readback = {key: value(actual, key) for key in settings}
+        readback["guide_count"] = int(value(actual, "GetGuideCurvesCount"))
+        settings["guide_count"] = len(guides)
+        if mode == "constant_twist":
+            readback["twist_angle_deg"] = math.degrees(float(value(actual, "GetD2TwistAngle" if direction == "second" else "GetTwistAngle")))
+            settings["twist_angle_deg"] = angle if direction == "second" else -angle if reverse else angle
+            if direction == "both":
+                readback["second_twist_angle_deg"] = math.degrees(float(value(actual, "GetD2TwistAngle")))
+                settings["second_twist_angle_deg"] = second
+        payload["data"]["native_settings"] = readback
+        # Direction is inapplicable (-1) for circular profiles and endpoint profiles.
+        # Only the default first direction can accept that native sentinel.
+        if direction == "first" and readback["Direction"] == -1:
+            settings.pop("Direction")
+        mismatched = [key for key, expected in settings.items()
+                      if not math.isclose(float(readback[key]), float(expected), abs_tol=1e-8)]
+        if mismatched:
+            payload.update(ok=False, message=f"Surface sweep was created, but native settings differ: {', '.join(mismatched)}.")
+        elif not as_list(safe(feature, "GetFaces")) or any(safe(safe(face, "GetBody"), "GetType") != BODY_SHEET for face in as_list(safe(feature, "GetFaces"))):
+            payload.update(ok=False, message="Surface sweep did not produce faces on a surface body.")
+    return payload
+
+
 def _curve_selection(selection):
     if not isinstance(selection, dict) or not selection or set(selection) - {"edges", "surface_edges", "sketches"} or not any(selection.values()):
         raise RuntimeError("Select boundary edges or whole sketches.")

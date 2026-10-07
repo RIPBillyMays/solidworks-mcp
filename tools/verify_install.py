@@ -118,6 +118,21 @@ async def protocol(install, expected, catalog, scratch):
                     hole_face = next(face for face in faces if face["point_mm"][0] >= 90)
                     if not math.isclose(hole_face["area_mm2"], 100 - math.pi, rel_tol=1e-7):
                         raise RuntimeError("Installed MCP selective hole removal changed an unselected hole.")
+                    await call("create_sketch", {"plane": "front", "name": "InstalledSweepProfile"})
+                    await call("draw_line", {"x1_mm": -5, "y1_mm": 200, "x2_mm": 5, "y2_mm": 200})
+                    await call("close_sketch")
+                    await call("create_sketch", {"plane": "right", "name": "InstalledSweepPath"})
+                    await call("draw_line", {"x1_mm": 0, "y1_mm": 200, "x2_mm": -10, "y2_mm": 200})
+                    await call("close_sketch")
+                    swept = await call("surface_sweep", {"profile_sketch": "InstalledSweepProfile", "path_sketch": "InstalledSweepPath",
+                                       "twist_control": "constant_twist", "twist_angle_deg": 90, "reverse_twist": True})
+                    if not math.isclose(swept["native_settings"]["twist_angle_deg"], -90, abs_tol=1e-8):
+                        raise RuntimeError("Installed MCP signed sweep twist readback differs.")
+                    edges = (await call("list_edges", {"body_type": "surface"}))["edges"]
+                    midpoints = [edge["point_mm"] for edge in edges if edge.get("point_mm")
+                                 and edge["point_mm"][1] > 190 and math.isclose(edge["point_mm"][2], 5, abs_tol=0.02)]
+                    if len(midpoints) != 2 or any(p[0] * (p[1] - 200) >= 0 for p in midpoints):
+                        raise RuntimeError(f"Installed MCP reversed sweep geometry differs: {midpoints}.")
                 await call("list_reference_points")
                 systems = await call("list_coordinate_systems")
                 if scratch and systems["coordinate_systems"][0]["origin_mm"] != [2, 3, 4]:

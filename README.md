@@ -6,7 +6,7 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-161 tools: sketching with real relations and driving dimensions, the solid
+162 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
 the model can see what it just built.
@@ -195,6 +195,7 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 | `move_copy_bodies` | 实体平移、旋转或复制；平移和旋转分两次调用，长度为 mm、角度为度。 |
 | `combine_bodies` | 多实体并集、差集与交集；差集的第一个实体为保留的主体。 |
 | `delete_bodies` | 创建删除/保留实体特征。 |
+| `surface_sweep` | 开口/闭合草图或圆截面扫描；导引线、法向控制、扭转、第一/第二/双向扫描，读回原生参数。要求 SW 2018+。 |
 | `delete_surface_holes` | 删除选定曲面孔边界，保留未选孔；支持单孔与多孔。 |
 | `surface_extrude` / `planar_surface` | 从草图生成拉伸曲面或平面曲面。 |
 | `offset_surface` / `knit_surfaces` / `thicken_surface` | 偏移面、缝合曲面和曲面加厚；读取实际曲面或实体结果。 |
