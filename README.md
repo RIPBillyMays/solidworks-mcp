@@ -6,7 +6,7 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-142 tools: sketching with real relations and driving dimensions, the solid
+153 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
 the model can see what it just built.
@@ -134,6 +134,16 @@ late-bound Python cannot QueryInterface a `Face2` to `IEntity`.
 `list_reference_planes`, `create_plane` (offset / angle / midplane / three points /
 parallel-through-point), `create_axis`.
 
+`create_reference_points` / `list_reference_points` 支持圆心、直线中点、面中心、
+距离/百分比分布、均匀分布、交点、投影及草图点，读回模型坐标。
+`create_coordinate_system` / `list_coordinate_systems` 创建与查询坐标系，
+原点单位为 mm，输入角度为度；数值坐标系创建需要 SolidWorks 2022+。
+参考点投影当前支持模型面，基准面投影仍是覆盖缺口。
+
+`create_curve_through_points` / `get_curve_points` / `set_curve_points` 创建、
+读取和修改通过 XYZ 点的原生参考曲线，输入和输出坐标均为 mm。
+`composite_curve` 将相连的草图、边或参考曲线生成组合曲线。
+
 ### Sketching
 `create_sketch` (on a plane **or a model face**), `edit_sketch`, `close_sketch`,
 `list_sketches`, `list_sketch_segments`, `get_sketch_status`.
@@ -160,6 +170,17 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 | `get_mass_properties` / `get_bounding_box` / `measure` | Numbers to check the geometry against. |
 | `check_errors` | What SOLIDWORKS thinks is wrong — see below. |
 | `set_view` | Named view plus zoom-to-fit. |
+
+### 直接编辑
+
+| 工具 | 功能 |
+| --- | --- |
+| `move_faces` | 面偏移、按 XYZ 平移或绕指定原点旋转；长度为 mm、角度为度。 |
+| `delete_faces` | 删除面，可选择修补、填充或相切填充；仅删除可能将实体变成曲面。 |
+| `replace_faces` | 用指定曲面替换模型面，目标面与替换曲面分别使用原生选择标记。 |
+
+拓扑改变后重新查询面和边。删除与修补、替换面已通过实机体积/面积检查；
+删除面的填充及相切填充模式仍待专项验证。
 
 ### Assemblies
 `list_components`, `insert_component`, `add_mate`, `list_mates`,

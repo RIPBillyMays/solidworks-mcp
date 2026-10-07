@@ -32,6 +32,8 @@ FEATURE_TOOLS = {
     "swFmUnfoldedView": ["insert_projected_view"], "swFmRefPlane": ["create_plane"],
     "swFmRefAxis": ["create_axis"], "swFmRefSurface": ["surface_extrude", "planar_surface", "offset_surface", "knit_surfaces"],
     "swFmProfileFeature": ["create_sketch"], "swFmWeldMemberFeat": ["insert_structural_member"],
+    "swFmCoordinateSystem": ["create_coordinate_system", "list_coordinate_systems"],
+    "swFmRefCurve": ["create_curve_through_points", "get_curve_points", "set_curve_points", "composite_curve"],
 }
 
 MODULE_TOOLS = {"Motion": ["list_motion_studies", "create_motion_study", "activate_motion_study",

@@ -64,6 +64,7 @@ from . import sw_multibody  # noqa: F401
 from . import sw_sheetmetal  # noqa: F401
 from . import sw_weldment  # noqa: F401
 from . import sw_motion  # noqa: F401
+from . import sw_geometry  # noqa: F401
 
 
 server = Server("solidworks-mcp")
