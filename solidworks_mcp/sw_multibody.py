@@ -16,7 +16,7 @@
 
 import math
 from .sw_core import (
-    BODY_SHEET, SELECTION_SCHEMA, dispatch_array, byref_long, clear_selection, exit_active_sketch,
+    BODY_SHEET, SELECTION_SCHEMA, dispatch_array, byref_long, clear_selection, exit_active_sketch, call_versioned,
     feature_manager, feature_result, flag_methods, get_bodies, nothing,
     rename_feature, require_part, require_selection, result,
     select_sketch_for_feature, to_m, to_rad, tool, as_list, value,
@@ -367,3 +367,73 @@ def cut_with_surface(args):
     if int(errors.value):
         payload.update(ok=False, message="Native surface cut reported an error.")
     return payload
+
+
+def _surface_boundary_selection(selection):
+    if not isinstance(selection, dict) or not selection or set(selection) - {"surface_faces", "surface_edges"}:
+        raise RuntimeError("Select surface_faces or surface_edges from topology listings with body_type=surface.")
+    if not any(selection.values()):
+        raise RuntimeError("Select at least one surface face or edge.")
+    for indices in selection.values():
+        if not isinstance(indices, list) or any(not isinstance(i, int) or isinstance(i, bool) or i < 0 for i in indices) or len(set(indices)) != len(indices):
+            raise RuntimeError("Surface topology indices must be distinct nonnegative integers.")
+
+
+@tool("extend_surface", "Extend selected surface faces (all boundary edges) or individual surface edges. Distance is mm; up_to_point requires a selected point and up_to_surface requires a solid face. Re-list surface topology afterwards.",
+      {"selection": SELECTION_SCHEMA, "linear": {"type": "boolean", "default": False},
+       "end_condition": {"type": "string", "enum": ["distance", "up_to_point", "up_to_surface"], "default": "distance"},
+       "distance_mm": {"type": "number", "exclusiveMinimum": 0}, "target_selection": SELECTION_SCHEMA, "name": NAME}, ["selection"])
+def extend_surface(args):
+    _surface_boundary_selection(args["selection"])
+    mode = args.get("end_condition", "distance")
+    if mode not in {"distance", "up_to_point", "up_to_surface"}:
+        raise RuntimeError("Invalid surface extension end condition.")
+    distance = _positive(args.get("distance_mm", 0), "distance_mm") if mode == "distance" else 0
+    target = args.get("target_selection")
+    if mode != "distance" and not target:
+        raise RuntimeError("A target_selection is required for this end condition.")
+    if mode != "distance" and float(args.get("distance_mm", 0)) != 0:
+        raise RuntimeError("distance_mm applies only to distance extension.")
+    if mode == "distance" and target:
+        raise RuntimeError("Distance extension does not accept target_selection.")
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    require_selection(doc, args["selection"])
+    if target and require_selection(doc, target, append=True) != 1:
+        raise RuntimeError("Select exactly one target point or solid face.")
+    before = _feature_names(doc)
+    flag_methods(doc, "InsertExtendSurface").InsertExtendSurface(bool(args.get("linear", False)),
+        {"distance": 0, "up_to_point": 1, "up_to_surface": 2}[mode], to_m(distance))
+    return _finish(doc, _feature_created_after(doc, before), args, "surface extension")
+
+
+@tool("untrim_surface", "Restore trimmed surface faces or selected edges. Faces support all/internal/external boundaries; selected edges support extending by a percentage of their natural boundary or connecting endpoints. trim_opposite_side requires merge=false and SolidWorks 2024+.",
+      {"selection": SELECTION_SCHEMA,
+       "face_mode": {"type": "string", "enum": ["all", "internal", "external"], "default": "all"},
+       "edge_mode": {"type": "string", "enum": ["extend", "connect_endpoints"], "default": "extend"},
+       "extend_percent": {"type": "number", "minimum": 0, "default": 0, "description": "Percentage of the natural boundary; only for surface_edges with edge_mode=extend."},
+       "merge": {"type": "boolean", "default": True}, "trim_opposite_side": {"type": "boolean", "default": False}, "name": NAME}, ["selection"])
+def untrim_surface(args):
+    _surface_boundary_selection(args["selection"])
+    faces = {"all": 0, "internal": 1, "external": 2}
+    edges = {"extend": 2, "connect_endpoints": 1}
+    face_mode, edge_mode = args.get("face_mode", "all"), args.get("edge_mode", "extend")
+    distance = float(args.get("extend_percent", 0))
+    if face_mode not in faces or edge_mode not in edges or not math.isfinite(distance) or distance < 0:
+        raise RuntimeError("Invalid untrim mode or extension percentage.")
+    if distance and (not args["selection"].get("surface_edges") or edge_mode != "extend"):
+        raise RuntimeError("extend_percent applies only to selected edges in extend mode.")
+    if edge_mode == "connect_endpoints" and len(args["selection"].get("surface_edges", [])) < 2:
+        raise RuntimeError("Connect endpoints requires at least two selected surface edges.")
+    merge, opposite = bool(args.get("merge", True)), bool(args.get("trim_opposite_side", False))
+    if merge and opposite:
+        raise RuntimeError("trim_opposite_side requires merge=false.")
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    require_selection(doc, args["selection"])
+    manager = flag_methods(feature_manager(doc), "InsertUntrimSurface2", "InsertUntrimSurface")
+    parameters = (faces[face_mode], edges[edge_mode], distance, merge)
+    candidates = [("InsertUntrimSurface2", parameters + (opposite,))]
+    if not opposite:
+        candidates.append(("InsertUntrimSurface", parameters))
+    return _finish(doc, call_versioned(manager, *candidates), args, "surface untrim")

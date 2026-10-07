@@ -801,7 +801,8 @@ def component_bodies(component: Any, body_type: int = BODY_SOLID) -> list[Any]:
     except Exception:
         pass
     try:
-        return as_list(safe(component, "GetBody"))
+        bodies = as_list(safe(component, "GetBody"))
+        return bodies if body_type == BODY_ALL else [body for body in bodies if safe(body, "GetType") == body_type]
     except Exception:
         return []
 
@@ -882,7 +883,7 @@ def _face_point(face: Any, matrix: Sequence[float] | None = None) -> list[float]
     return _point_on(face, safe(face, "GetBox"), matrix)
 
 
-def iter_face_objects(doc: Any) -> list[tuple[Any, list[float] | None]]:
+def iter_face_objects(doc: Any, body_type: int = BODY_SOLID) -> list[tuple[Any, list[float] | None]]:
     """Every face as (object, component transform), in list_faces index order.
 
     Selecting a face needs the COM object, and a point on it only if selecting
@@ -895,16 +896,16 @@ def iter_face_objects(doc: Any) -> list[tuple[Any, list[float] | None]]:
     """
     return [
         (face, matrix)
-        for body, _, matrix in iter_body_context(doc)
+        for body, _, matrix in iter_body_context(doc, body_type)
         for face in as_list(safe(body, "GetFaces"))
     ]
 
 
-def iter_edge_objects(doc: Any) -> list[tuple[Any, list[float] | None]]:
+def iter_edge_objects(doc: Any, body_type: int = BODY_SOLID) -> list[tuple[Any, list[float] | None]]:
     """Every edge as (object, component transform), in list_edges index order."""
     return [
         (edge, matrix)
-        for body, _, matrix in iter_body_context(doc)
+        for body, _, matrix in iter_body_context(doc, body_type)
         for edge in as_list(safe(body, "GetEdges"))
     ]
 
@@ -957,10 +958,10 @@ def rotate_vector(vector: Sequence[float], matrix: Sequence[float] | None) -> li
     ]
 
 
-def enumerate_faces(doc: Any) -> list[dict[str, Any]]:
+def enumerate_faces(doc: Any, body_type: int = BODY_SOLID) -> list[dict[str, Any]]:
     faces: list[dict[str, Any]] = []
     index = 0
-    for body_index, (body, body_name, matrix) in enumerate(iter_body_context(doc)):
+    for body_index, (body, body_name, matrix) in enumerate(iter_body_context(doc, body_type)):
         for face in as_list(safe(body, "GetFaces")):
             entry: dict[str, Any] = {"index": index, "body_index": body_index, "body": body_name, "_obj": face}
             point = _point_on(face, safe(face, "GetBox"), matrix)
@@ -1022,10 +1023,10 @@ def _edge_endpoints(edge: Any, matrix: Sequence[float] | None = None) -> dict[st
     return endpoints
 
 
-def enumerate_edges(doc: Any) -> list[dict[str, Any]]:
+def enumerate_edges(doc: Any, body_type: int = BODY_SOLID) -> list[dict[str, Any]]:
     edges: list[dict[str, Any]] = []
     index = 0
-    for body_index, (body, body_name, matrix) in enumerate(iter_body_context(doc)):
+    for body_index, (body, body_name, matrix) in enumerate(iter_body_context(doc, body_type)):
         for edge in as_list(safe(body, "GetEdges")):
             entry: dict[str, Any] = {"index": index, "body_index": body_index, "body": body_name, "_obj": edge}
             point = _edge_point(edge, matrix)
@@ -1174,6 +1175,8 @@ SELECTION_SCHEMA = {
     "properties": {
         "faces": {"type": "array", "items": {"type": "integer"}, "description": "Face indices from list_faces."},
         "edges": {"type": "array", "items": {"type": "integer"}, "description": "Edge indices from list_edges."},
+        "surface_faces": {"type": "array", "items": {"type": "integer", "minimum": 0}, "description": "Face indices from list_faces(body_type=surface), separate from solid faces."},
+        "surface_edges": {"type": "array", "items": {"type": "integer", "minimum": 0}, "description": "Edge indices from list_edges(body_type=surface), separate from solid edges."},
         "vertices": {"type": "array", "items": {"type": "integer"}, "description": "Vertex indices from list_vertices."},
         "face_edges": {
             "type": "array",
@@ -1317,6 +1320,14 @@ def apply_selection(doc: Any, spec: dict[str, Any] | None, mark: int = 0, append
     if spec.get("edges"):
         count += _select_indexed_objects(
             doc, iter_edge_objects(doc), spec["edges"], SELECT_TYPE_EDGE, mark, "Edge", _edge_point
+        )
+    if spec.get("surface_faces"):
+        count += _select_indexed_objects(
+            doc, iter_face_objects(doc, BODY_SHEET), spec["surface_faces"], SELECT_TYPE_FACE, mark, "Surface face", _face_point
+        )
+    if spec.get("surface_edges"):
+        count += _select_indexed_objects(
+            doc, iter_edge_objects(doc, BODY_SHEET), spec["surface_edges"], SELECT_TYPE_EDGE, mark, "Surface edge", _edge_point
         )
     if spec.get("vertices"):
         # Vertices keep the measured enumeration: it deduplicates by coordinate,

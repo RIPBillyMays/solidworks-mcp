@@ -62,6 +62,26 @@ async def protocol(install, expected, catalog, scratch):
                     area = sum(body["area_mm2"] for body in surfaces["surface_bodies"])
                     if not math.isclose(area, 2 * math.pi * 5 * 10, rel_tol=1e-7):
                         raise RuntimeError("Installed MCP revolved surface area differs.")
+                    edges = await call("list_edges", {"body_type": "surface"})
+                    if len(edges["edges"]) != 2:
+                        raise RuntimeError("Installed MCP surface-edge enumeration differs.")
+                    await call("extend_surface", {"selection": {"surface_edges": [edges["edges"][0]["index"]]}, "distance_mm": 5})
+                    surfaces = await call("list_surface_bodies")
+                    actual_area = sum(body["area_mm2"] for body in surfaces["surface_bodies"])
+                    if not math.isclose(actual_area, 2 * math.pi * 5 * 15, rel_tol=1e-6, abs_tol=0.05):
+                        raise RuntimeError(f"Installed MCP surface extension area differs: {actual_area}; edges={edges['edges']}.")
+                    await call("create_sketch", {"plane": "front", "name": "InstalledHoleProfile"})
+                    await call("draw_rectangle", {"x1_mm": 20, "y1_mm": 20, "x2_mm": 30, "y2_mm": 30})
+                    await call("draw_circle", {"x_mm": 25, "y_mm": 25, "radius_mm": 1})
+                    await call("close_sketch")
+                    await call("planar_surface", {"sketch_name": "InstalledHoleProfile"})
+                    faces = await call("list_faces", {"body_type": "surface", "surface_type": "plane"})
+                    if len(faces["faces"]) != 1:
+                        raise RuntimeError("Installed MCP surface-face enumeration differs.")
+                    await call("untrim_surface", {"selection": {"surface_faces": [faces["faces"][0]["index"]]}, "face_mode": "internal"})
+                    faces = await call("list_faces", {"body_type": "surface", "surface_type": "plane"})
+                    if not math.isclose(faces["faces"][0]["area_mm2"], 100, rel_tol=1e-7):
+                        raise RuntimeError("Installed MCP internal untrim area differs.")
                 await call("list_reference_points")
                 systems = await call("list_coordinate_systems")
                 if scratch and systems["coordinate_systems"][0]["origin_mm"] != [2, 3, 4]:
