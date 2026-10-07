@@ -16,10 +16,10 @@
 
 import math
 from .sw_core import (
-    BODY_SHEET, SELECTION_SCHEMA, dispatch_array, byref_long, clear_selection, exit_active_sketch, call_versioned,
+    BODY_SHEET, BODY_SOLID, SELECTION_SCHEMA, dispatch_array, integer_array, byref_long, byref_variant, clear_selection, exit_active_sketch, call_versioned,
     feature_manager, feature_result, flag_methods, get_bodies, nothing,
     rename_feature, require_part, require_selection, result,
-    select_sketch_for_feature, to_m, to_rad, tool, as_list, value,
+    select_sketch_for_feature, to_m, to_rad, tool, as_list, value, safe,
 )
 from .sw_feature import _feature_created_after, _feature_names
 
@@ -437,3 +437,167 @@ def untrim_surface(args):
     if not opposite:
         candidates.append(("InsertUntrimSurface", parameters))
     return _finish(doc, call_versioned(manager, *candidates), args, "surface untrim")
+
+
+def _selected_objects(doc, selection, mark=0):
+    require_selection(doc, selection, mark=mark)
+    manager = flag_methods(doc.SelectionManager, "GetSelectedObjectCount2", "GetSelectedObject6")
+    return [manager.GetSelectedObject6(i, mark) for i in range(1, manager.GetSelectedObjectCount2(mark) + 1)]
+
+
+def _curve_selection(selection):
+    if not isinstance(selection, dict) or not selection or set(selection) - {"edges", "surface_edges", "sketches"} or not any(selection.values()):
+        raise RuntimeError("Select boundary edges or whole sketches.")
+    for key, entries in selection.items():
+        if not isinstance(entries, list) or len(set(entries)) != len(entries):
+            raise RuntimeError("Boundary selection lists must contain distinct entries.")
+        if key != "sketches" and any(not isinstance(i, int) or isinstance(i, bool) or i < 0 for i in entries):
+            raise RuntimeError("Boundary edge indices must be nonnegative integers.")
+        if key == "sketches" and any(not isinstance(i, str) or not i.strip() for i in entries):
+            raise RuntimeError("Boundary sketches require nonempty names.")
+
+
+@tool("fill_surface", "Create a filled surface from edge/sketch boundary groups with requested continuity and native control readback. Sketches support contact only. Curvature is forwarded but returns failure if the native API cannot confirm it. Supports direction faces, internal constraints, optimize, merge and try-to-form-solid.",
+      {"boundaries": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
+          "selection": SELECTION_SCHEMA, "continuity": {"type": "string", "enum": ["contact", "tangent", "curvature"], "default": "contact"},
+          "direction_face_selection": SELECTION_SCHEMA}, "required": ["selection"]}},
+       "constraint_selection": SELECTION_SCHEMA, "resolution": {"type": "integer", "minimum": 1, "maximum": 3, "default": 2},
+       "optimize": {"type": "boolean", "default": True}, "merge": {"type": "boolean", "default": False},
+       "try_form_solid": {"type": "boolean", "default": False}, "reverse_direction": {"type": "boolean", "default": False},
+       "reverse_surface": {"type": "boolean", "default": False}, "name": NAME}, ["boundaries"])
+def fill_surface(args):
+    groups = args["boundaries"]
+    resolution = args.get("resolution", 2)
+    controls = {"contact": 0, "tangent": 1, "curvature": 2}
+    if not isinstance(groups, list) or not groups or not isinstance(resolution, int) or isinstance(resolution, bool) or not 1 <= resolution <= 3:
+        raise RuntimeError("Provide boundary groups and resolution 1, 2 or 3.")
+    seen = set()
+    for group in groups:
+        if not isinstance(group, dict) or "selection" not in group:
+            raise RuntimeError("Each boundary group needs a selection.")
+        _curve_selection(group["selection"])
+        for key, entries in group["selection"].items():
+            for entry in entries:
+                identity = (key, entry)
+                if identity in seen:
+                    raise RuntimeError("A boundary entity cannot appear in multiple groups.")
+                seen.add(identity)
+        continuity = group.get("continuity", "contact")
+        if continuity not in controls or (continuity != "contact" and group["selection"].get("sketches")):
+            raise RuntimeError("Invalid continuity; sketch boundaries support contact only.")
+    if args.get("constraint_selection"):
+        _curve_selection(args["constraint_selection"])
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    boundaries, types, faces = [], [], []
+    for group in groups:
+        objects = _selected_objects(doc, group["selection"])
+        direction = None
+        if group.get("direction_face_selection"):
+            selected = _selected_objects(doc, group["direction_face_selection"])
+            if len(selected) != 1:
+                raise RuntimeError("Select exactly one direction face per boundary group.")
+            direction = selected[0]
+        boundaries.extend(objects)
+        types.extend([controls[group.get("continuity", "contact")]] * len(objects))
+        faces.extend([direction] * len(objects))
+    constraints = _selected_objects(doc, args["constraint_selection"]) if args.get("constraint_selection") else []
+    clear_selection(doc)
+    for group in groups:
+        mark = {"contact": 257, "tangent": 513, "curvature": 1}[group.get("continuity", "contact")]
+        require_selection(doc, group["selection"], mark=mark, append=True)
+    if constraints:
+        require_selection(doc, args["constraint_selection"], mark=4, append=True)
+    options = sum(flag for key, flag, default in (("optimize", 1, True), ("try_form_solid", 2, False),
+        ("merge", 4, False), ("reverse_direction", 8, False), ("reverse_surface", 16, False)) if args.get(key, default))
+    manager = flag_methods(feature_manager(doc), "InsertFillSurface2")
+    feature = manager.InsertFillSurface2(resolution, options, dispatch_array(boundaries), integer_array(types),
+        dispatch_array(faces) if any(face is not None for face in faces) else nothing(),
+        dispatch_array(constraints) if constraints else nothing())
+    payload = _finish(doc, feature, args, "filled surface")
+    if payload["ok"]:
+        data = flag_methods(value(feature, "GetDefinition"), "AccessSelections", "ReleaseSelectionAccess", "GetPatchBoundary", "GetCurvatureControl")
+        if not data.AccessSelections(doc, nothing()):
+            payload.update(ok=False, message="Filled surface was created, but native continuity could not be read.")
+        else:
+            try:
+                entities = as_list(data.GetPatchBoundary(byref_variant()))
+                actual = [int(data.GetCurvatureControl(entity)) for entity in entities]
+                payload["data"]["native_continuity_controls"] = actual
+                if sorted(actual) != sorted(types):
+                    payload.update(ok=False, message="Filled surface was created, but native continuity does not confirm the requested controls.")
+            finally:
+                data.ReleaseSelectionAccess()
+    if payload["ok"] and args.get("try_form_solid", False):
+        filled_faces = as_list(safe(feature, "GetFaces"))
+        if not any(safe(safe(face, "GetBody"), "GetType") == BODY_SOLID for face in filled_faces):
+            payload.update(ok=False, message="Filled surface did not produce a face on a solid body.")
+    return payload
+
+
+@tool("ruled_surface", "Create a ruled surface along solid or surface edges. Supports tangent, normal, tapered-to-vector, perpendicular-to-vector and sweep modes. Length is mm, taper angle is degrees; sweep can use a numeric direction vector. Alternate face uses native selection mark 6. Normal-mode pull reversal remains unconfirmed and returns failure after creation.",
+      {"selection": SELECTION_SCHEMA, "mode": {"type": "string", "enum": ["tangent", "normal", "tapered", "perpendicular", "sweep"], "default": "tangent"},
+       "length_mm": {"type": "number", "exclusiveMinimum": 0}, "angle_deg": {"type": "number", "default": 0},
+       "direction_selection": SELECTION_SCHEMA, "direction_vector": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+       "alternate_face": {"type": "boolean", "default": False}, "flip_pull_direction": {"type": "boolean", "default": False},
+       "flip_direction": {"type": "boolean", "default": False}, "trim_and_knit": {"type": "boolean", "default": False},
+       "remove_connecting_surfaces": {"type": "boolean", "default": False}, "name": NAME}, ["selection", "length_mm"])
+def ruled_surface(args):
+    _curve_selection(args["selection"])
+    if args["selection"].get("sketches"):
+        raise RuntimeError("Ruled surfaces require model edges, not sketch boundaries.")
+    modes = {"tangent": 0, "normal": 1, "tapered": 2, "perpendicular": 3, "sweep": 4}
+    mode = args.get("mode", "tangent")
+    length = _positive(args["length_mm"], "length_mm")
+    angle = float(args.get("angle_deg", 0))
+    if mode not in modes or not math.isfinite(angle) or abs(angle) >= 90 or (mode != "tapered" and angle != 0):
+        raise RuntimeError("Invalid ruled mode or taper angle; taper angle must be between -90 and 90 degrees.")
+    direction = args.get("direction_selection")
+    vector = args.get("direction_vector")
+    if vector is not None:
+        if mode != "sweep" or direction or not isinstance(vector, list) or len(vector) != 3:
+            raise RuntimeError("Numeric direction_vector is supported only by sweep and cannot be combined with direction_selection.")
+        vector = [float(v) for v in vector]
+        magnitude = math.sqrt(sum(v * v for v in vector))
+        if not math.isfinite(magnitude) or magnitude == 0:
+            raise RuntimeError("Direction vector must be finite and nonzero.")
+        vector = [v / magnitude for v in vector]
+    if mode in {"tapered", "perpendicular", "sweep"} and not direction and vector is None:
+        raise RuntimeError("This ruled mode requires a direction_selection or a sweep direction_vector.")
+    if mode in {"tangent", "normal"} and direction:
+        raise RuntimeError("Tangent and normal modes do not accept direction_selection.")
+    if args.get("flip_pull_direction", False) and mode not in {"normal", "tapered"}:
+        raise RuntimeError("flip_pull_direction applies only to normal and tapered modes.")
+    if args.get("flip_direction", False) and mode != "perpendicular":
+        raise RuntimeError("flip_direction applies only to perpendicular mode.")
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    require_selection(doc, args["selection"], mark=6 if args.get("alternate_face", False) else 4)
+    if direction and require_selection(doc, direction, mark=1, append=True) != 1:
+        raise RuntimeError("Select exactly one direction reference.")
+    manager = flag_methods(feature_manager(doc), "InsertRuledSurfaceFromEdge2", "InsertRuledSurfaceFromEdge")
+    parameters = (modes[mode], to_m(length), bool(args.get("flip_pull_direction", False)), bool(args.get("flip_direction", False)),
+        bool(args.get("trim_and_knit", False)), to_rad(angle), vector is not None, *(vector or [0, 0, 0]))
+    candidates = [("InsertRuledSurfaceFromEdge2", parameters + (bool(args.get("remove_connecting_surfaces", False)),))]
+    if not args.get("remove_connecting_surfaces", False):
+        candidates.append(("InsertRuledSurfaceFromEdge", parameters))
+    feature = call_versioned(manager, *candidates)
+    angle_applied = True
+    if feature is not None and mode == "tapered":
+        data = flag_methods(value(feature, "GetDefinition"), "AccessSelections", "ReleaseSelectionAccess")
+        if not data.AccessSelections(doc, nothing()):
+            angle_applied = False
+        else:
+            try:
+                if not math.isclose(float(value(data, "Angle")), to_rad(angle), abs_tol=1e-8):
+                    data.Angle = to_rad(angle)
+                    angle_applied = bool(flag_methods(feature, "ModifyDefinition").ModifyDefinition(data, doc, nothing()))
+            finally:
+                data.ReleaseSelectionAccess()
+        angle_applied = angle_applied and math.isclose(float(value(value(feature, "GetDefinition"), "Angle")), to_rad(angle), abs_tol=1e-8)
+    payload = _finish(doc, feature, args, "ruled surface")
+    if not angle_applied:
+        payload.update(ok=False, message="Ruled surface was created, but the requested taper angle could not be confirmed.")
+    if feature is not None and mode == "normal" and args.get("flip_pull_direction", False):
+        payload.update(ok=False, message="Ruled surface was created, but normal-mode pull reversal is not confirmed by this implementation.")
+    return payload

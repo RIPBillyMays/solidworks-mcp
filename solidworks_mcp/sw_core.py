@@ -450,8 +450,16 @@ def dispatch_array(values: Sequence[Any]) -> Any:
     return win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_DISPATCH, tuple(values))
 
 
+def integer_array(values: Sequence[int]) -> Any:
+    return win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_I4, tuple(int(v) for v in values))
+
+
 def byref_long(initial: int = 0) -> Any:
     return win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, initial)
+
+
+def byref_variant() -> Any:
+    return win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_VARIANT, None)
 
 
 def as_list(com_array: Any) -> list[Any]:

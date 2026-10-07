@@ -82,6 +82,24 @@ async def protocol(install, expected, catalog, scratch):
                     faces = await call("list_faces", {"body_type": "surface", "surface_type": "plane"})
                     if not math.isclose(faces["faces"][0]["area_mm2"], 100, rel_tol=1e-7):
                         raise RuntimeError("Installed MCP internal untrim area differs.")
+                    await call("create_sketch", {"plane": "front", "name": "InstalledFillProfile"})
+                    await call("draw_rectangle", {"x1_mm": 60, "y1_mm": 60, "x2_mm": 70, "y2_mm": 70})
+                    await call("close_sketch")
+                    filled = await call("fill_surface", {"boundaries": [{"selection": {"sketches": ["InstalledFillProfile"]}}]})
+                    if filled["native_continuity_controls"] != [0]:
+                        raise RuntimeError("Installed MCP filled-surface continuity readback differs.")
+                    faces = await call("list_faces", {"body_type": "surface", "surface_type": "plane"})
+                    filled_face = next(face for face in faces["faces"] if face["point_mm"][0] >= 50)
+                    if not math.isclose(filled_face["area_mm2"], 100, rel_tol=1e-7):
+                        raise RuntimeError("Installed MCP filled-surface area differs.")
+                    edges = await call("list_edges", {"body_type": "surface"})
+                    boundary = next(edge["index"] for edge in edges["edges"] if edge["body_index"] == filled_face["body_index"])
+                    await call("ruled_surface", {"selection": {"surface_edges": [boundary]}, "mode": "tapered",
+                               "length_mm": 5, "angle_deg": 30, "direction_selection": {"planes": ["front"]}})
+                    faces = await call("list_faces", {"body_type": "surface"})
+                    patch = next(face for face in faces["faces"] if math.isclose(face["area_mm2"], 50, rel_tol=1e-7))
+                    if not math.isclose(abs(patch["normal"][2]), 0.5, abs_tol=1e-6):
+                        raise RuntimeError("Installed MCP ruled-surface taper inclination differs.")
                 await call("list_reference_points")
                 systems = await call("list_coordinate_systems")
                 if scratch and systems["coordinate_systems"][0]["origin_mm"] != [2, 3, 4]:
