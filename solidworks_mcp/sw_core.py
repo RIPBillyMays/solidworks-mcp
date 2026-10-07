@@ -405,13 +405,11 @@ def call_versioned(obj: Any, *candidates: tuple[str, Sequence[Any]]) -> Any:
     List the newest first with its full arguments and the older ones with the
     prefix they take; a build that lacks the newer name (SOLIDWORKS 2016 has
     no FeatureCut4) silently gets the older call, and a build that has it never
-    pays for the fallback.  Names already known to be absent are skipped
-    without another cross-process lookup.
+    pays for the fallback. Method availability is checked on this object:
+    a failed flag on another interface does not prove this member is absent.
     """
     last: Exception | None = None
     for name, args in candidates:
-        if name in _UNFLAGGABLE_NAMES:
-            continue
         try:
             method = getattr(obj, name)
         except AttributeError as exc:

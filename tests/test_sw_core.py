@@ -194,12 +194,26 @@ class CallVersionedTests(unittest.TestCase):
         self.assertEqual(obj.calls, [("FeatureCut3", (1, 2))])
         self.assertIn("FeatureCut4", sw_core._UNFLAGGABLE_NAMES)
 
-    def test_a_name_known_to_be_absent_is_not_looked_up_again(self) -> None:
-        """Each lookup is a cross-process GetIDsOfNames, so remember the misses."""
+    def test_a_flag_failure_on_another_interface_does_not_hide_a_member(self) -> None:
         sw_core._UNFLAGGABLE_NAMES.add("FeatureCut4")
-        obj = FakeVersionedDispatch({"FeatureCut3"})
-        sw_core.call_versioned(obj, ("FeatureCut4", ()), ("FeatureCut3", ()))
-        self.assertEqual(obj.attempted, ["FeatureCut3"])
+        obj = FakeVersionedDispatch({"FeatureCut4", "FeatureCut3"})
+        outcome = sw_core.call_versioned(obj, ("FeatureCut4", ()), ("FeatureCut3", ()))
+        self.assertEqual(outcome, "FeatureCut4 feature")
+        self.assertEqual(obj.attempted, ["FeatureCut4"])
+
+    def test_missing_member_on_one_object_does_not_poison_another(self) -> None:
+        old = FakeVersionedDispatch({"FeatureCut3"})
+        new = FakeVersionedDispatch({"FeatureCut4", "FeatureCut3"})
+        candidates = (("FeatureCut4", ()), ("FeatureCut3", ()))
+        sw_core.call_versioned(old, *candidates)
+        self.assertEqual(sw_core.call_versioned(new, *candidates), "FeatureCut4 feature")
+
+    def test_a_failed_invocation_does_not_retry_with_an_older_member(self) -> None:
+        obj = unittest.mock.Mock()
+        obj.FeatureCut4.side_effect = RuntimeError("rebuild failed")
+        with self.assertRaisesRegex(RuntimeError, "rebuild failed"):
+            sw_core.call_versioned(obj, ("FeatureCut4", ()), ("FeatureCut3", ()))
+        obj.FeatureCut3.assert_not_called()
 
     def test_no_candidate_at_all_is_a_clear_error_naming_every_candidate(self) -> None:
         obj = FakeVersionedDispatch(set())
