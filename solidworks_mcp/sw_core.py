@@ -722,6 +722,14 @@ def select_object(doc: Any, obj: Any, mark: int = 0, append: bool = True) -> boo
         return False
 
 
+def select_body(doc: Any, body: Any, mark: int = 0, append: bool = True) -> bool:
+    """IBody2.Select2 takes ISelectData, unlike IFeature.Select2's integer mark."""
+    selection_manager = flag_methods(doc.SelectionManager, "CreateSelectData")
+    data = selection_manager.CreateSelectData()
+    data.Mark = mark
+    return bool(flag_methods(body, "Select2").Select2(append, data))
+
+
 def resolve_plane_name(doc: Any, name: str, planes: Sequence[str] | None = None) -> str:
     """Accept either an exact localized plane name or front/top/right.
 
@@ -1397,7 +1405,7 @@ def apply_selection(doc: Any, spec: dict[str, Any] | None, mark: int = 0, append
         index = int(raw_index)
         if not 0 <= index < len(bodies):
             raise RuntimeError(f"Body index {index} is out of range (0..{len(bodies) - 1}).")
-        if not select_object(doc, bodies[index], mark, True):
+        if not select_body(doc, bodies[index], mark, True):
             raise RuntimeError(f"Could not select body {index}.")
         count += 1
 

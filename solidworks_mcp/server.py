@@ -59,6 +59,8 @@ from . import sw_inspect  # noqa: F401
 from . import sw_assembly  # noqa: F401
 from . import sw_drawing  # noqa: F401
 from . import sw_demo  # noqa: F401
+from . import sw_manage  # noqa: F401
+from . import sw_multibody  # noqa: F401
 
 
 server = Server("solidworks-mcp")

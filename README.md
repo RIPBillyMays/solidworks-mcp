@@ -6,7 +6,7 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-92 tools: sketching with real relations and driving dimensions, the solid
+120 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
 the model can see what it just built.
@@ -160,7 +160,37 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 
 ### Assemblies
 `list_components`, `insert_component`, `add_mate`, `list_mates`,
-`set_component_fixed`.
+`set_component_fixed`, `set_component_visibility`, `set_component_suppression`,
+`set_component_configuration`.
+
+### 多实体、曲面与螺旋线
+
+| 工具 | 功能 |
+| --- | --- |
+| `scale_bodies` | 选定实体等比例或按 X/Y/Z 缩放，支持质心与原点。 |
+| `move_copy_bodies` | 实体平移、旋转或复制；平移和旋转分两次调用，长度为 mm、角度为度。 |
+| `combine_bodies` | 多实体并集、差集与交集；差集的第一个实体为保留的主体。 |
+| `delete_bodies` | 创建删除/保留实体特征。 |
+| `surface_extrude` / `planar_surface` | 从草图生成拉伸曲面或平面曲面。 |
+| `list_surface_bodies` | 查询曲面体及其面积，面积单位为 mm²。 |
+| `create_helix` | 从圆草图按螺距和圈数生成螺旋线，读取实际螺距、圈数及高度。 |
+
+实体操作沿用 `selection`，例如 `{"selection": {"bodies": [0, 1]}}`。
+索引取自 `list_bodies`，几何变化后需重新查询。曲面体索引与实体索引独立，
+本批实体编辑工具只接受实体。
+
+### 文档、配置、属性与方程
+
+| 工具 | 功能 |
+| --- | --- |
+| `list_open_documents` / `activate_document` / `close_document` | 查询、切换和关闭已有文档；关闭有未保存修改的文档需显式传入 `discard_changes=true`。 |
+| `list_configurations` / `create_configuration` / `activate_configuration` / `delete_configuration` | 查询、创建、激活和删除配置；不能删除活动配置。 |
+| `list_custom_properties` / `get_custom_property` / `set_custom_property` / `delete_custom_property` | 查询和编辑文档级或配置级自定义属性，包括原始值、解析值与类型。 |
+| `list_equations` / `add_equation` / `set_equation` / `delete_equation` / `evaluate_equations` | 查询和编辑方程与全局变量，使用 SOLIDWORKS 方程语法，例如 `"Width" = 25mm`。 |
+| `list_materials` | 搜索实际配置的材质库，返回可传给 `set_material` 的准确名称与数据库路径。 |
+
+`configuration` 为空时操作文档级属性，非空时必须是已存在的配置名称。
+方程里的单位由 SOLIDWORKS 语法解释，应明确写出 `mm` 等单位；方程索引在删除后变化。
 
 ### Engineering drawings
 `create_drawing`, `list_sheets`, `add_sheet`, `activate_sheet`,
@@ -297,8 +327,18 @@ ring, swept rod and lofted cone match their closed-form volumes; a 5-degree
 under its profile; `through_all_both` removes the full cylinder rather than half
 of it. The limitations above are what survived that pass.
 
-Older releases work too, back to at least SOLIDWORKS 2016 SP3, where every tool
-was exercised the same way on a German install. Where a release lacks the newest
+新增 28 个工具使用 `tests/live_expansion_regression.py` 验证。该脚本只修改新建测试文档，
+结束时关闭它们并恢复原活动文档；装配体引用的测试零件保存在输出根目录下
+`.expansion-tests/<uuid>/`。验证包括缩放体积、旋转包围盒、布尔运算体积、
+曲面面积、螺旋线高度、配置、属性、方程以及组件状态的读取结果。
+
+```powershell
+python tests/live_expansion_regression.py
+```
+
+The original 92 tools were also exercised on SOLIDWORKS 2016 SP3 with a German
+install. The 28 expansion tools have been checked on SOLIDWORKS 2026 SP3.2;
+their behaviour on older releases has not yet been verified. Where a release lacks the newest
 numbered method (`FeatureCut4`, `FeatureLinearPattern5`, `CreateDetailViewAt4`,
 ...) the tool falls back to the earlier variant with the arguments it takes; on
 newer releases the newest name is always tried first, so nothing changes there.
@@ -316,6 +356,9 @@ newer releases the newest name is always tried first, so nothing changes there.
 | `sw_assembly.py` | Components and mates |
 | `sw_drawing.py` | Sheets, views, model items, dimensions, center marks, notes |
 | `sw_demo.py` | Basketball demo, opt-in via `SW_MCP_DEMO_TOOLS` |
+| `sw_manage.py` | 文档切换、配置、自定义属性、方程、材质库搜索 |
+| `sw_multibody.py` | 多实体操作、曲面、螺旋线和曲面面积查询 |
+| `tests/live_expansion_regression.py` | 新增工具的实机回归与测试文档清理 |
 | `tests/live_p0_regression.py` | Live regression checks for the confirmed P0 part/sketch defects |
 | `tools/tlb_probe.py` | Reads signatures and enums straight off your installed type library |
 | `server.py` | Registry assembly and stdio dispatch |
