@@ -19,7 +19,8 @@ from .sw_core import (
     BODY_SHEET, BODY_SOLID, SELECTION_SCHEMA, dispatch_array, integer_array, byref_long, byref_variant, clear_selection, exit_active_sketch, call_versioned,
     feature_manager, feature_result, flag_methods, get_bodies, nothing,
     rename_feature, require_part, require_selection, result,
-    select_sketch_for_feature, to_m, to_rad, tool, as_list, value, safe,
+    select_sketch_for_feature, to_m, to_mm, to_rad, tool, as_list, value, safe,
+    byref_double, byref_dispatch, find_feature, _face_point, _surface_details, mm_point,
 )
 from .sw_feature import _feature_created_after, _feature_names
 
@@ -51,6 +52,107 @@ def _selected_bodies(doc, selection, minimum=1, mark=0):
 def _finish(doc, feature, args, action, **data):
     rename_feature(feature, args.get("name"))
     return feature_result(doc, feature, action, **data)
+
+
+def _mid_face_info(face):
+    info = {"area_mm2": float(value(face, "GetArea")) * 1e6}
+    point = _face_point(face)
+    if point is not None:
+        info["point_mm"] = mm_point(point)
+    normal = safe(face, "Normal")
+    if normal is not None:
+        info["normal"] = [float(v) for v in normal[:3]]
+    surface = safe(face, "GetSurface")
+    if surface is not None:
+        info.update(_surface_details(surface))
+    return info
+
+
+def _mid_surface_info(feature):
+    if feature is None or safe(feature, "GetTypeName2") != "MidRefSurface":
+        raise RuntimeError("Specify an existing midsurface feature.")
+    mid = flag_methods(value(feature, "GetSpecificFeature2"), "GetFirstFacePair", "GetNextFacePair", "GetFirstFace", "GetNextFace")
+    pair_count = int(value(mid, "GetFacePairCount"))
+    face_count = int(value(mid, "GetFaceCount"))
+    faces = as_list(value(mid, "GetFaces"))
+    if pair_count <= 0 or face_count <= 0 or len(faces) != face_count:
+        raise RuntimeError("Native midsurface topology is empty or inconsistent.")
+    pairs = []
+    for i in range(pair_count):
+        thickness, partner = byref_double(), byref_dispatch()
+        first = (mid.GetFirstFacePair if i == 0 else mid.GetNextFacePair)(thickness, partner)
+        if first is None or partner.value is None or not math.isfinite(thickness.value) or thickness.value <= 0:
+            raise RuntimeError("Native midsurface face-pair traversal is incomplete.")
+        pairs.append({"index": i, "thickness_mm": to_mm(thickness.value),
+                      "source_faces": [_mid_face_info(first), _mid_face_info(partner.value)]})
+    neutral = []
+    for i in range(face_count):
+        first, partner, thickness = byref_dispatch(), byref_dispatch(), byref_double()
+        face = (mid.GetFirstFace if i == 0 else mid.GetNextFace)(first, partner, thickness)
+        if face is None or first.value is None or partner.value is None or thickness.value <= 0:
+            raise RuntimeError("Native neutral-face traversal is incomplete.")
+        info = _mid_face_info(face)
+        info["thickness_mm"] = to_mm(thickness.value)
+        info["measured_placement"] = _mid_placement(face, first.value, partner.value, thickness.value)
+        neutral.append(info)
+    return {"name": str(value(feature, "Name")), "face_pair_count": pair_count,
+            "face_count": face_count, "sheet_count": int(value(mid, "GetNeutralSheetCount")),
+            "area_mm2": sum(face["area_mm2"] for face in neutral), "face_pairs": pairs, "faces": neutral}
+
+
+def _mid_placement(face, first, partner, thickness):
+    point = _face_point(face)
+    if point is None:
+        return None
+    try:
+        distances = []
+        for source in (first, partner):
+            closest = flag_methods(source, "GetClosestPointOn").GetClosestPointOn(*point)
+            distances.append(math.sqrt(sum((point[i] - closest[i]) ** 2 for i in range(3))))
+        if not math.isclose(sum(distances), thickness, rel_tol=1e-5, abs_tol=1e-7):
+            return None
+        return (distances[1] - distances[0]) / thickness
+    except Exception:
+        return None
+
+
+@tool("mid_surface", "Create an automatic midsurface in the active part using native face-pair detection. Placement -1..1 requests the neutral surface position; 0 is halfway. Nonzero placement is forwarded but returns failure if actual geometry cannot confirm it. Knit requests one sewn surface body. Reports actual face pairs, thicknesses, surface counts and geometry.",
+      {"placement": {"type": "number", "minimum": -1, "maximum": 1, "default": 0},
+       "knit": {"type": "boolean", "default": True}, "name": NAME})
+def mid_surface(args):
+    placement = float(args.get("placement", 0))
+    if not math.isfinite(placement) or not -1 <= placement <= 1:
+        raise RuntimeError("Midsurface placement must be finite and between -1 and 1.")
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    clear_selection(doc)
+    before = _feature_names(doc)
+    manager = flag_methods(feature_manager(doc), "InsertMidSurface")
+    try:
+        create = manager.InsertMidSurface
+    except AttributeError:
+        returned = flag_methods(doc, "InsertMidSurfaceExt").InsertMidSurfaceExt(placement, bool(args.get("knit", True)))
+    else:
+        # Body/document arguments apply to assembly context only; null in a part.
+        returned = create(nothing(), nothing(), placement, bool(args.get("knit", True)))
+    feature = _feature_created_after(doc, before) if returned is not None else None
+    payload = _finish(doc, feature, args, "midsurface")
+    if payload["ok"]:
+        info = _mid_surface_info(feature)
+        payload["data"]["midsurface"] = info
+        payload["data"]["requested_placement"] = placement
+        if any(face["measured_placement"] is None or not math.isclose(face["measured_placement"], placement, abs_tol=1e-5) for face in info["faces"]):
+            payload.update(ok=False, message="Midsurface was created, but its actual geometry does not confirm the requested placement.")
+        if args.get("knit", True) and info["sheet_count"] != 1:
+            payload.update(ok=False, message="Midsurface was created, but native knitting did not produce one surface body.")
+    return payload
+
+
+@tool("get_mid_surface_data", "Read-only: inspect a named midsurface feature. Reports actual original face pairs and thicknesses in mm, neutral surface faces and total area in mm2; does not regenerate the feature.",
+      {"name": NAME}, ["name"])
+def get_mid_surface_data(args):
+    _, doc = require_part()
+    return result(True, "Read native midsurface geometry.", midsurface=_mid_surface_info(find_feature(doc, args["name"])))
 
 
 @tool("scale_bodies", "Scale selected solid bodies uniformly or along X/Y/Z about their centroid or the model origin. Re-list topology afterwards.",

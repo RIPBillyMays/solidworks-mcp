@@ -133,6 +133,19 @@ async def protocol(install, expected, catalog, scratch):
                                  and edge["point_mm"][1] > 190 and math.isclose(edge["point_mm"][2], 5, abs_tol=0.02)]
                     if len(midpoints) != 2 or any(p[0] * (p[1] - 200) >= 0 for p in midpoints):
                         raise RuntimeError(f"Installed MCP reversed sweep geometry differs: {midpoints}.")
+                    await call("create_sketch", {"plane": "front", "name": "InstalledMidProfile"})
+                    await call("draw_rectangle", {"x1_mm": 300, "y1_mm": 300, "x2_mm": 320, "y2_mm": 310})
+                    await call("close_sketch")
+                    await call("boss_extrude", {"sketch_name": "InstalledMidProfile", "depth_mm": 2})
+                    middle = (await call("mid_surface", {"name": "InstalledMid"}))["midsurface"]
+                    if middle["face_pair_count"] != 1 or middle["sheet_count"] != 1:
+                        raise RuntimeError("Installed MCP midsurface topology differs.")
+                    if not math.isclose(middle["area_mm2"], 200, abs_tol=1e-7) or not math.isclose(middle["face_pairs"][0]["thickness_mm"], 2, abs_tol=1e-7):
+                        raise RuntimeError("Installed MCP midsurface area/thickness differs.")
+                    if not math.isclose(middle["faces"][0]["point_mm"][2], 1, abs_tol=1e-7):
+                        raise RuntimeError("Installed MCP midsurface placement differs.")
+                    if (await call("get_mid_surface_data", {"name": "InstalledMid"}))["midsurface"] != middle:
+                        raise RuntimeError("Installed MCP read-only midsurface inspection differs.")
                 await call("list_reference_points")
                 systems = await call("list_coordinate_systems")
                 if scratch and systems["coordinate_systems"][0]["origin_mm"] != [2, 3, 4]:

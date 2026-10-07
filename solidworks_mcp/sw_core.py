@@ -462,6 +462,14 @@ def byref_variant() -> Any:
     return win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_VARIANT, None)
 
 
+def byref_double(initial: float = 0) -> Any:
+    return win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_R8, float(initial))
+
+
+def byref_dispatch() -> Any:
+    return win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_DISPATCH, None)
+
+
 def as_list(com_array: Any) -> list[Any]:
     """Normalise the several shapes SOLIDWORKS uses for 'array or nothing'."""
     if com_array is None:
