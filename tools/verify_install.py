@@ -15,6 +15,7 @@ part and closes it afterwards; default calls only read the active document.
 import argparse
 import asyncio
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -52,6 +53,15 @@ async def protocol(install, expected, catalog, scratch):
                     if actual["curve"]["points_mm"] != points:
                         raise RuntimeError("Installed MCP curve coordinate readback differs.")
                     await call("create_coordinate_system", {"name": "InstalledCS", "origin_mm": [2, 3, 4]})
+                    await call("create_sketch", {"plane": "front", "name": "InstalledRevolveProfile"})
+                    await call("draw_line", {"x1_mm": 5, "y1_mm": 0, "x2_mm": 5, "y2_mm": 10})
+                    await call("draw_centerline", {"x1_mm": 0, "y1_mm": 0, "x2_mm": 0, "y2_mm": 10})
+                    await call("close_sketch")
+                    await call("surface_revolve", {"sketch_name": "InstalledRevolveProfile"})
+                    surfaces = await call("list_surface_bodies")
+                    area = sum(body["area_mm2"] for body in surfaces["surface_bodies"])
+                    if not math.isclose(area, 2 * math.pi * 5 * 10, rel_tol=1e-7):
+                        raise RuntimeError("Installed MCP revolved surface area differs.")
                 await call("list_reference_points")
                 systems = await call("list_coordinate_systems")
                 if scratch and systems["coordinate_systems"][0]["origin_mm"] != [2, 3, 4]:

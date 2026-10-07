@@ -16,7 +16,7 @@
 
 import math
 from .sw_core import (
-    BODY_SHEET, SELECTION_SCHEMA, dispatch_array,
+    BODY_SHEET, SELECTION_SCHEMA, dispatch_array, byref_long, clear_selection, exit_active_sketch,
     feature_manager, feature_result, flag_methods, get_bodies, nothing,
     rename_feature, require_part, require_selection, result,
     select_sketch_for_feature, to_m, to_rad, tool, as_list, value,
@@ -272,4 +272,98 @@ def knit_surfaces(args):
     payload = _finish(doc, feature, args, "surface knit")
     if payload["ok"] and args.get("form_solid", False) and len(get_bodies(doc)) <= before:
         payload.update(ok=False, message="Knit feature did not form a closed solid.")
+    return payload
+
+
+@tool("surface_revolve", "Revolve an open 2D sketch into a reference surface. A sketch centerline or axis_selection supplies the axis. Angles are degrees; supports one direction, midplane or two directions.",
+      {"sketch_name": NAME, "axis_selection": SELECTION_SCHEMA, "angle_deg": {"type": "number", "exclusiveMinimum": 0, "maximum": 360, "default": 360},
+       "angle2_deg": {"type": "number", "minimum": 0, "maximum": 360, "default": 0},
+       "mode": {"type": "string", "enum": ["one_direction", "midplane", "two_directions"], "default": "one_direction"},
+       "reverse": {"type": "boolean", "default": False}, "name": NAME})
+def surface_revolve(args):
+    angle = _positive(args.get("angle_deg", 360), "angle_deg")
+    second = float(args.get("angle2_deg", 0))
+    mode = args.get("mode", "one_direction")
+    if mode not in {"one_direction", "midplane", "two_directions"} or angle > 360 or not math.isfinite(second) or not 0 <= second <= 360:
+        raise RuntimeError("Invalid surface revolve mode or angle.")
+    if (mode == "two_directions" and (second <= 0 or angle + second > 360)) or (mode != "two_directions" and second != 0):
+        raise RuntimeError("Two directions requires positive angle2_deg and a total angle <=360; other modes require angle2_deg=0.")
+    _, doc = require_part()
+    sketch = select_sketch_for_feature(doc, args.get("sketch_name"))
+    if args.get("axis_selection"):
+        require_selection(doc, args["axis_selection"], mark=4, append=True)
+    before = len(get_bodies(doc, BODY_SHEET))
+    manager = flag_methods(feature_manager(doc), "InsertRevolvedRefSurface")
+    feature = manager.InsertRevolvedRefSurface(to_rad(angle), bool(args.get("reverse", False)), to_rad(second),
+                                              {"one_direction": 0, "midplane": 1, "two_directions": 2}[mode])
+    payload = _finish(doc, feature, args, "revolved surface", sketch=sketch)
+    if payload["ok"] and len(get_bodies(doc, BODY_SHEET)) <= before:
+        payload.update(ok=False, message="Surface revolve did not produce a surface body.")
+    return payload
+
+
+@tool("surface_loft", "Loft an ordered set of open or closed sketches into a surface. Supports guide curves, centerline and none/normal/vector/adjacent-face end tangency. A closed loft requires at least three profiles.",
+      {"profile_sketches": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 2, "uniqueItems": True},
+       "guide_selection": SELECTION_SCHEMA, "centerline_selection": SELECTION_SCHEMA,
+       "start_tangency": {"type": "string", "enum": ["none", "normal", "vector", "adjacent_faces"], "default": "none"},
+       "end_tangency": {"type": "string", "enum": ["none", "normal", "vector", "adjacent_faces"], "default": "none"},
+       "start_vector_selection": SELECTION_SCHEMA, "end_vector_selection": SELECTION_SCHEMA,
+       "closed": {"type": "boolean", "default": False}, "keep_tangency": {"type": "boolean", "default": True},
+       "force_non_rational": {"type": "boolean", "default": False}, "tolerance_factor": {"type": "number", "exclusiveMinimum": 0, "default": 1}, "name": NAME}, ["profile_sketches"])
+def surface_loft(args):
+    profiles = args["profile_sketches"]
+    closed = bool(args.get("closed", False))
+    if not isinstance(profiles, list) or len(profiles) < (3 if closed else 2) or any(not isinstance(p, str) or not p.strip() for p in profiles) or len(set(profiles)) != len(profiles):
+        raise RuntimeError("Provide distinct ordered profile sketches; closed lofts require at least three.")
+    tolerance = _positive(args.get("tolerance_factor", 1), "tolerance_factor")
+    tangencies = {"none": 0, "normal": 1, "vector": 2, "adjacent_faces": 3}
+    start, end = args.get("start_tangency", "none"), args.get("end_tangency", "none")
+    if start not in tangencies or end not in tangencies:
+        raise RuntimeError("Invalid loft tangency mode.")
+    for side, kind in (("start", start), ("end", end)):
+        if kind == "vector" and not args.get(f"{side}_vector_selection"):
+            raise RuntimeError(f"{side} vector tangency requires {side}_vector_selection.")
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    clear_selection(doc)
+    for index, sketch in enumerate(profiles):
+        require_selection(doc, {"sketches": [sketch]}, mark=1, append=index > 0)
+    for key, mark in (("guide_selection", 2), ("centerline_selection", 4), ("start_vector_selection", 8), ("end_vector_selection", 32)):
+        if args.get(key):
+            require_selection(doc, args[key], mark=mark, append=True)
+    before = _feature_names(doc)
+    count = len(get_bodies(doc, BODY_SHEET))
+    flag_methods(doc, "InsertLoftRefSurface2").InsertLoftRefSurface2(closed, bool(args.get("keep_tangency", True)),
+        bool(args.get("force_non_rational", False)), tolerance, tangencies[start], tangencies[end])
+    payload = _finish(doc, _feature_created_after(doc, before), args, "lofted surface", profiles=profiles)
+    if payload["ok"] and len(get_bodies(doc, BODY_SHEET)) <= count:
+        payload.update(ok=False, message="Surface loft did not produce a surface body.")
+    return payload
+
+
+@tool("cut_with_surface", "Cut solid bodies with one selected reference plane or surface. Optional body_indices limits scope to existing solid bodies; flip changes the removed side. Re-list topology afterwards.",
+      {"selection": SELECTION_SCHEMA, "flip": {"type": "boolean", "default": False},
+       "body_indices": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 1, "uniqueItems": True},
+       "keep_piece_index": {"type": "integer", "minimum": -1, "default": -1}, "name": NAME}, ["selection"])
+def cut_with_surface(args):
+    indices = args.get("body_indices")
+    if indices is not None and (not isinstance(indices, list) or not indices or any(not isinstance(i, int) or isinstance(i, bool) or i < 0 for i in indices) or len(set(indices)) != len(indices)):
+        raise RuntimeError("body_indices must contain distinct nonnegative solid-body indices.")
+    piece = args.get("keep_piece_index", -1)
+    if not isinstance(piece, int) or isinstance(piece, bool) or piece < -1:
+        raise RuntimeError("keep_piece_index must be an integer >=-1.")
+    _, doc = require_part()
+    bodies = get_bodies(doc)
+    if not bodies or (indices is not None and any(i >= len(bodies) for i in indices)):
+        raise RuntimeError("No matching solid bodies exist. Re-list bodies before selecting cut scope.")
+    exit_active_sketch(doc)
+    if require_selection(doc, args["selection"]) != 1:
+        raise RuntimeError("Select exactly one cutting plane or surface.")
+    errors = byref_long()
+    manager = flag_methods(feature_manager(doc), "InsertCutSurface")
+    scope = dispatch_array([bodies[i] for i in indices]) if indices is not None else nothing()
+    feature = manager.InsertCutSurface(bool(args.get("flip", False)), piece, True, indices is None, scope, errors)
+    payload = _finish(doc, feature, args, "surface cut", error_code=int(errors.value))
+    if int(errors.value):
+        payload.update(ok=False, message="Native surface cut reported an error.")
     return payload
