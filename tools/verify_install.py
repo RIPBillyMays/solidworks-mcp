@@ -202,12 +202,22 @@ async def protocol(install, expected, catalog, scratch):
                     await call("create_sketch", {"plane_name": "WrapPlane", "name": "WrapProfile"})
                     await call("draw_rectangle", {"x1_mm": -20, "y1_mm": -2, "x2_mm": -10, "y2_mm": 2})
                     await call("close_sketch")
+                    await call("create_sketch", {"plane_name": "WrapPlane", "name": "WideWrapProfile"})
+                    await call("draw_rectangle", {"x1_mm": -20, "y1_mm": -4, "x2_mm": -10, "y2_mm": 4})
+                    await call("close_sketch")
                     index = next(f["index"] for f in (await call("list_faces"))["faces"] if f["surface_type"] == "cylinder")
                     wrapped = await call("wrap_sketch", {"sketch_name": "WrapProfile", "face_index": index, "name": "InstalledWrap"})
                     if not math.isclose(wrapped["volume_change_mm3"], 42, abs_tol=1e-6):
                         raise RuntimeError("Installed MCP wrap volume differs.")
                     if (await call("get_wrap_data", {"name": "InstalledWrap"}))["wrap"] != wrapped["wrap"]:
                         raise RuntimeError("Installed MCP wrap definition differs.")
+                    source_edit = await call("set_wrap_parameters", {"name": "InstalledWrap", "source_sketch_name": "WideWrapProfile"})
+                    if not source_edit["wrap"]["source_reference_confirmed"] or not math.isclose(source_edit["volume_change_from_input_mm3"], 84, abs_tol=1e-6):
+                        raise RuntimeError("Installed MCP wrap source reference or geometry differs.")
+                    target_data = source_edit["wrap"]["target_face"]
+                    if target_data.get("radius_mm") != 10 or not math.isclose(target_data["area_mm2"], 600 * math.pi, abs_tol=1e-6):
+                        raise RuntimeError("Installed MCP wrap original-target geometry differs.")
+                    await call("set_wrap_parameters", {"name": "InstalledWrap", "source_sketch_name": "WrapProfile"})
                     edited = await call("set_wrap_parameters", {"name": "InstalledWrap", "thickness_mm": 2})
                     if not math.isclose(edited["volume_change_from_input_mm3"], 88, abs_tol=1e-6) or edited["wrap"]["thickness_mm"] != 2:
                         raise RuntimeError("Installed MCP wrap thickness edit differs.")

@@ -198,7 +198,7 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 | `mid_surface` / `get_mid_surface_data` | 原生自动中面与只读检查；读取面配对、厚度、面积、位置和缝合结果。非零位置未生效时返回失败。 |
 | `preview_surface_trim` / `trim_surface` / `get_surface_trim_data` | 标准与相互曲面修剪；预览区域面积、边界与选择点，按区域索引保留或删除，并读取原生特征数据。 |
 | `boundary_surface` / `get_boundary_feature_data` | 单/双方向有序曲线的边界曲面、按方向修剪、原生形成实体选项及只读检查；相切/曲率控制按边界采样核验几何，未确认时保留特征并返回失败。 |
-| `wrap_sketch` / `get_wrap_data` / `set_wrap_parameters` | 单/多实体面的包覆凸起、凹陷与刻划，解析/样条方法，基准面/草图线/直边拉伸方向及厚度/模式/方向修改。以体积、面分割、原生定义和持久引用验证。方法/网格精度不可读回；反向几何和清除方向未生效时返回失败。 |
+| `wrap_sketch` / `get_wrap_data` / `set_wrap_parameters` | 单/多实体面的包覆三模式、解析/样条方法、三类方向及厚度/模式/方向/源草图修改；读回原生 `Face` 字段的前置几何。以体积、面分割、原生定义和持久引用快照验证。方法/网格不可读回；反向、清除方向及目标面修改未确认时返回失败。 |
 | `surface_sweep` | 开口/闭合草图或圆截面扫描；导引线、法向控制、扭转、第一/第二/双向扫描，读回原生参数。要求 SW 2018+。 |
 | `delete_surface_holes` | 删除选定曲面孔边界，保留未选孔；支持单孔与多孔。 |
 | `surface_extrude` / `planar_surface` | 从草图生成拉伸曲面或平面曲面。 |

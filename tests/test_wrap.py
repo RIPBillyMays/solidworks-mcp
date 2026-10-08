@@ -10,6 +10,8 @@ import unittest
 from solidworks_mcp import sw_wrap as wrap
 
 ARGS = {"sketch_name": "Profile", "face_index": 0}
+FACE = SimpleNamespace(GetSurface=lambda: SimpleNamespace(Identity=lambda: 4001, PlaneParams=[0, 0, 1, 0, 0, 0]),
+                       GetArea=lambda: .0001, GetBox=lambda: [0, 0, 0, .01, .01, 0])
 
 
 class WrapContracts(unittest.TestCase):
@@ -101,7 +103,7 @@ class WrapContracts(unittest.TestCase):
         events = []
         definition = SimpleNamespace(AccessSelections=lambda *a: True, ReleaseSelectionAccess=lambda: events.append("release"),
                                      SourceSketch=SimpleNamespace(Name="Profile"), Type=2, Thickness=.001,
-                                     ReverseDirection=False, Face=object(), PullDirection=None)
+                                     ReverseDirection=False, Face=FACE, PullDirection=None)
         feature = SimpleNamespace(GetTypeName2=lambda: "Emboss", GetDefinition=lambda: definition, GetFaces=lambda: [])
         with patch.object(wrap, "_geometry", side_effect=lambda d: events.append("geometry") or {}):
             info = wrap._wrap_info("doc", feature)
@@ -113,7 +115,7 @@ class WrapContracts(unittest.TestCase):
         actual, expected = object(), object()
         definition = SimpleNamespace(AccessSelections=lambda *a: True, ReleaseSelectionAccess=lambda: None,
                                      SourceSketch=SimpleNamespace(Name="Profile"), Type=0, Thickness=.001,
-                                     ReverseDirection=False, Face=object(), PullDirection=actual)
+                                     ReverseDirection=False, Face=FACE, PullDirection=actual)
         feature = SimpleNamespace(GetTypeName2=lambda: "Emboss", GetDefinition=lambda: definition, GetFaces=lambda: [])
         for refs, confirmed in (([(1, 2), (1, 2)], True), ([(1, 2), (2, 1)], False), ([()], False)):
             with patch.object(wrap, "_reference_id", side_effect=refs), patch.object(wrap, "_geometry", return_value={}):
@@ -122,7 +124,9 @@ class WrapContracts(unittest.TestCase):
     def test_edit_invalid_requests_fail_before_com(self):
         for args in ({"name": "Wrap"}, {"name": "Wrap", "thickness_mm": 0}, {"name": "Wrap", "mode": "bad"},
                      {"name": "Wrap", "reverse_direction": 1}, {"name": "Wrap", "clear_pull_direction": False},
-                     {"name": "Wrap", "pull_selection": {"planes": ["right"]}, "clear_pull_direction": True}):
+                     {"name": "Wrap", "pull_selection": {"planes": ["right"]}, "clear_pull_direction": True},
+                     {"name": "Wrap", "source_sketch_name": " "}, {"name": "Wrap", "target_face_index": True},
+                     {"name": "Wrap", "target_face_index": -1}):
             with patch.object(wrap, "require_part") as part:
                 with self.assertRaises(RuntimeError): wrap.set_wrap_parameters(args)
                 part.assert_not_called()
@@ -160,6 +164,50 @@ class WrapContracts(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "native failure"):
                 wrap.set_wrap_parameters({"name": "Wrap", "thickness_mm": 2})
         released.assert_called_once()
+
+    def test_persistent_reference_freezes_native_memoryview(self):
+        buffer = bytearray([1, 2, 3])
+        doc = SimpleNamespace(Extension=SimpleNamespace(GetPersistReference3=lambda obj: memoryview(buffer)))
+        snapshot = wrap._reference_id(doc, object())
+        buffer[0] = 9
+        self.assertEqual(snapshot, b"\x01\x02\x03")
+
+    def test_source_edit_passes_sketch_object_and_verifies_frozen_reference(self):
+        definition = SimpleNamespace(AccessSelections=lambda *a: True, ReleaseSelectionAccess=lambda: None)
+        feature = SimpleNamespace(GetDefinition=lambda: definition, ModifyDefinition=lambda *a: True)
+        sketch = object()
+        source_feature = SimpleNamespace(GetTypeName2=lambda: "ProfileFeature", GetSpecificFeature2=lambda: sketch)
+        info = {"mode": "emboss", "source_sketch": "Wide", "source_reference_confirmed": True,
+                "reverse_direction": False, "solid_volume_mm3": 184, "solid_face_count": 8}
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(wrap, "find_feature", side_effect=[feature, source_feature]))
+            for name, returned in {"require_part": (None, "doc"), "_wrap_info": info, "_reference_id": b"source",
+                                   "_geometry": {"solid_volume_mm3": 100, "solid_face_count": 3}, "whats_wrong": []}.items():
+                stack.enter_context(patch.object(wrap, name, return_value=returned))
+            for name in ("clear_selection", "exit_active_sketch", "rebuild"):
+                stack.enter_context(patch.object(wrap, name))
+            payload = wrap.set_wrap_parameters({"name": "Wrap", "source_sketch_name": "Wide"})
+        self.assertIs(definition.SourceSketch, sketch)
+        self.assertTrue(payload["ok"])
+
+    def test_ignored_target_edit_cannot_report_success(self):
+        definition = SimpleNamespace(AccessSelections=lambda *a: True, ReleaseSelectionAccess=lambda: None)
+        feature = SimpleNamespace(GetDefinition=lambda: definition, ModifyDefinition=lambda *a: True)
+        target = object()
+        doc = SimpleNamespace(SelectionManager=SimpleNamespace(GetSelectedObject6=lambda *a: target))
+        info = {"mode": "emboss", "reverse_direction": False, "target_reference_confirmed": False,
+                "solid_volume_mm3": 142, "solid_face_count": 8}
+        with ExitStack() as stack:
+            for name, returned in {"require_part": (None, doc), "find_feature": feature, "_wrap_info": info,
+                                   "_reference_id": b"target", "require_selection": 1, "whats_wrong": [],
+                                   "_geometry": {"solid_volume_mm3": 100, "solid_face_count": 3}}.items():
+                stack.enter_context(patch.object(wrap, name, return_value=returned))
+            for name in ("clear_selection", "exit_active_sketch", "rebuild"):
+                stack.enter_context(patch.object(wrap, name))
+            payload = wrap.set_wrap_parameters({"name": "Wrap", "target_face_index": 1})
+        self.assertIs(definition.Face, target)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["data"]["parameters_confirmed"])
 
 
 if __name__ == "__main__":
