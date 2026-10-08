@@ -37,6 +37,8 @@ async def protocol(install, expected, catalog, scratch):
                 raise RuntimeError("MCP tool count or uniqueness differs from the expected release.")
             async def call(name, arguments=None):
                 output = await session.call_tool(name, arguments or {})
+                if output.isError:
+                    raise RuntimeError(f"Installed MCP protocol error: {name}: {output.content[0].text}")
                 payload = json.loads(output.content[0].text)
                 if not payload["ok"]:
                     raise RuntimeError(f"Installed MCP call failed: {name}: {payload}")
@@ -51,6 +53,7 @@ async def protocol(install, expected, catalog, scratch):
             initial = await call("list_open_documents")
             original = initial["active_title"]
             title = None
+            wrap_title = None
             try:
                 if scratch:
                     title = (await call("create_new_document", {"kind": "part"}))["document"]["title"]
@@ -189,7 +192,25 @@ async def protocol(install, expected, catalog, scratch):
                 systems = await call("list_coordinate_systems")
                 if scratch and systems["coordinate_systems"][0]["origin_mm"] != [2, 3, 4]:
                     raise RuntimeError("Installed MCP coordinate-system origin readback differs.")
+                if scratch:
+                    wrap_title = (await call("create_new_document", {"kind": "part"}))["document"]["title"]
+                    await call("create_sketch", {"plane": "front", "name": "WrapBase"})
+                    await call("draw_circle", {"x_mm": 0, "y_mm": 0, "radius_mm": 10})
+                    await call("close_sketch")
+                    await call("boss_extrude", {"sketch_name": "WrapBase", "depth_mm": 30})
+                    await call("create_plane", {"mode": "offset", "selection": {"planes": ["right"]}, "distance_mm": 10, "name": "WrapPlane"})
+                    await call("create_sketch", {"plane_name": "WrapPlane", "name": "WrapProfile"})
+                    await call("draw_rectangle", {"x1_mm": -20, "y1_mm": -2, "x2_mm": -10, "y2_mm": 2})
+                    await call("close_sketch")
+                    index = next(f["index"] for f in (await call("list_faces"))["faces"] if f["surface_type"] == "cylinder")
+                    wrapped = await call("wrap_sketch", {"sketch_name": "WrapProfile", "face_index": index, "name": "InstalledWrap"})
+                    if not math.isclose(wrapped["volume_change_mm3"], 42, abs_tol=1e-6):
+                        raise RuntimeError("Installed MCP wrap volume differs.")
+                    if (await call("get_wrap_data", {"name": "InstalledWrap"}))["wrap"] != wrapped["wrap"]:
+                        raise RuntimeError("Installed MCP wrap definition differs.")
             finally:
+                if wrap_title:
+                    await call("close_document", {"name": wrap_title, "discard_changes": True})
                 if title:
                     await call("close_document", {"name": title, "discard_changes": True})
                 if scratch and original:
