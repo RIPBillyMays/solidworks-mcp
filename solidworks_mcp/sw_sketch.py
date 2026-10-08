@@ -359,12 +359,30 @@ def draw_centerline(args: dict[str, Any]) -> dict[str, Any]:
 def draw_circle(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
     before = _segment_count(doc)
-    segment = manager.CreateCircleByRadius(
-        to_m(args["x_mm"]), to_m(args["y_mm"]), 0.0, to_m(args["radius_mm"]),
-    )
+    previous = manager.AddToDB
+    try:
+        # Native documentation recommends bypassing UI inference for this API.
+        manager.AddToDB = True
+        segment = manager.CreateCircleByRadius(
+            to_m(args["x_mm"]), to_m(args["y_mm"]), 0.0, to_m(args["radius_mm"]),
+        )
+    finally:
+        manager.AddToDB = previous
     if segment is not None and bool(args.get("construction", False)):
         segment.ConstructionGeometry = True
-    return _drawn(doc, before, "a circle")
+    payload = _drawn(doc, before, "a circle")
+    if payload["ok"]:
+        if segment is None:
+            return result(False, "Circle geometry appeared, but its native reference could not be confirmed.")
+        center = value(segment, "GetCenterPoint2")
+        coords = [float(value(center, k)) * 1000 for k in ("X", "Y", "Z")]
+        radius = float(value(segment, "GetRadius")) * 1000
+        confirmed = math.dist(coords, [float(args["x_mm"]), float(args["y_mm"]), 0]) <= .01 and math.isclose(radius, float(args["radius_mm"]), abs_tol=.01, rel_tol=0)
+        payload.update(ok=confirmed)
+        payload["data"].update(center_mm=coords, radius_mm=radius)
+        if not confirmed:
+            payload["message"] = "Circle created, but requested center or radius could not be confirmed."
+    return payload
 
 
 @tool(

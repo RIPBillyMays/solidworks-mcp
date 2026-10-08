@@ -118,6 +118,31 @@ class Sketch3DContracts(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["data"]["point_mm"], [5, 0, 0])
 
+    def test_circle_bypasses_inference_and_restores_original_state(self):
+        for original in (False, True):
+            manager = SimpleNamespace(AddToDB=original)
+            def create(*coords):
+                self.assertTrue(manager.AddToDB)
+                self.assertEqual(coords, (.093, .095, 0, .001))
+                return SimpleNamespace(GetCenterPoint2=lambda: SimpleNamespace(X=.093, Y=.095, Z=0), GetRadius=lambda: .001)
+            manager.CreateCircleByRadius = create
+            with patch.object(sketch, "_require_open_sketch", return_value=(None, manager)), patch.object(sketch, "_segment_count", side_effect=[0, 1]):
+                self.assertTrue(sketch.draw_circle({"x_mm": 93, "y_mm": 95, "radius_mm": 1})["ok"])
+            self.assertEqual(manager.AddToDB, original)
+
+    def test_circle_restores_inference_after_native_exception(self):
+        manager = SimpleNamespace(AddToDB=False, CreateCircleByRadius=Mock(side_effect=RuntimeError("native rejection")))
+        with patch.object(sketch, "_require_open_sketch", return_value=(None, manager)), patch.object(sketch, "_segment_count", return_value=0):
+            with self.assertRaisesRegex(RuntimeError, "native rejection"):
+                sketch.draw_circle({"x_mm": 93, "y_mm": 95, "radius_mm": 1})
+        self.assertFalse(manager.AddToDB)
+
+    def test_circle_wrong_radius_is_not_success(self):
+        segment = SimpleNamespace(GetCenterPoint2=lambda: SimpleNamespace(X=.093, Y=.095, Z=0), GetRadius=lambda: .002)
+        manager = SimpleNamespace(AddToDB=False, CreateCircleByRadius=lambda *a: segment)
+        with patch.object(sketch, "_require_open_sketch", return_value=(None, manager)), patch.object(sketch, "_segment_count", side_effect=[0, 1]):
+            self.assertFalse(sketch.draw_circle({"x_mm": 93, "y_mm": 95, "radius_mm": 1})["ok"])
+
     def test_named_point_enumeration_reports_local_and_model_positions(self):
         matrix = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, .035, 1, 0, 0, 0]
         specific = SimpleNamespace(Is3D=lambda: False, GetSketchPoints2=lambda: [SimpleNamespace(X=.003, Y=0, Z=0, Type=1)],
