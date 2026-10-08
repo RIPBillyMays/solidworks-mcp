@@ -331,6 +331,19 @@ async def protocol(install, expected, catalog, scratch):
                     if converted["native_types"] != [1,3] or not converted["geometry_correspondence_confirmed"] or converted["max_source_point_gap_mm"] > .01:
                         raise RuntimeError("Installed MCP spatial circle/ellipse conversion differs.")
                     await call("close_sketch")
+                    await call("create_3d_sketch", {"name": "InstalledAxisDimensions"})
+                    await call("draw_line", {"x1_mm":0,"y1_mm":0,"x2_mm":10,"y2_mm":20,"z2_mm":30})
+                    names=[]
+                    for axis,target in zip("xyz",(15,25,35)):
+                        added=await call("add_3d_dimension", {"axis":axis,"point_indices":[0,1],"value_mm":target,"place_x_mm":50,"place_y_mm":50,"place_z_mm":50})
+                        if not added["edit_context_restored"] or not added["point_references_confirmed"] or abs(added["projected_distance_mm"]-target)>.01:
+                            raise RuntimeError("Installed MCP axis dimension or driven geometry differs.")
+                        names.append(added["full_name"])
+                    await call("close_sketch")
+                    await call("set_dimension", {"full_name":names[0],"value_mm":18})
+                    positions=(await call("list_sketch_points", {"sketch_name":"InstalledAxisDimensions"}))["points"]
+                    if abs(abs(positions[1]["model_point_mm"][0]-positions[0]["model_point_mm"][0])-18)>.01:
+                        raise RuntimeError("Installed MCP later dimension edit did not drive spatial geometry.")
             finally:
                 if sketch3d_title:
                     await call("close_document", {"name": sketch3d_title, "discard_changes": True})

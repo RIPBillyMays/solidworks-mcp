@@ -6,7 +6,7 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-179 tools: sketching with real relations and driving dimensions, the solid
+180 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
 the model can see what it just built.
@@ -161,6 +161,9 @@ parallel-through-point), `create_axis`.
 产生无有效曲线的原生对象，因此在修改前拒绝。模型边/面与部分圆弧等输入的完整对应
 几何核验仍未覆盖；返回的 `geometry_correspondence_confirmed` 明确区分已核验与未核验。
 其他 3D 曲线、工作平面、完整约束/尺寸与更多建模组合仍有缺口。
+`add_3d_dimension` 用两个原生点索引创建 X/Y/Z 投影尺寸；重建求解后恢复原草图编辑，
+核验线性尺寸、点的持久引用及实际轴向距离。零件 XYZ 和装配体 XY 实测通过；
+本机装配体 Z 接口返回空，明确失败并保留缺口。
 
 Geometry: `draw_line`, `draw_centerline`, `draw_circle`, `draw_rectangle`,
 `draw_arc`, `draw_3point_arc`, `draw_ellipse`, `draw_polygon`, `draw_slot`,

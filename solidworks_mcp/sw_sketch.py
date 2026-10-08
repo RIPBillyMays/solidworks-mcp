@@ -1090,6 +1090,70 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, "Added a dimension.", sketch_status=status, **applied)
 
 
+@tool("add_3d_dimension", "Create a native X/Y/Z projected linear dimension between two points of the open 3D sketch. Indices come from list_sketch_points. Values/placement are mm; an optional value is applied in all configurations, while geometry is verified in the active one. Rebuilds to solve deferred geometry, restores the same edit context, and verifies native dimension plus actual projected point distance. Native assembly Z may be refused and is reported as failure.",
+      {"axis":{"type":"string","enum":["x","y","z"]},"point_indices":{"type":"array","items":{"type":"integer","minimum":0},"minItems":2,"maxItems":2,"uniqueItems":True},
+       "value_mm":{"type":"number","minimum":0},"place_x_mm":{"type":"number","default":0},"place_y_mm":{"type":"number","default":0},"place_z_mm":{"type":"number","default":0}},["axis","point_indices"])
+def add_3d_dimension(args):
+    app,doc=active_document()
+    sketch=_active_sketch(doc)
+    if not bool(value(sketch,"Is3D")):
+        raise RuntimeError("Axis dimensions require an open 3D sketch.")
+    axis=str(args["axis"])
+    if axis not in ("x","y","z"):
+        raise RuntimeError("Axis must be x, y or z.")
+    indices=[int(i) for i in args["point_indices"]]
+    points=sketch_point_objects(doc)
+    if len(indices)!=2 or indices[0]==indices[1] or any(i<0 or i>=len(points) for i in indices):
+        raise RuntimeError("Select two distinct valid native sketch point indices.")
+    selected=[points[i] for i in indices]
+    references=[persistent_reference_id(doc,p) for p in selected]
+    if not all(references) or references[0]==references[1]:
+        raise RuntimeError("Cannot confirm two distinct native point references.")
+    coordinate=axis.upper()
+    before_distance=abs(float(value(selected[1],coordinate))-float(value(selected[0],coordinate)))
+    expected=before_distance
+    if args.get("value_mm") is not None:
+        expected=float(args["value_mm"])/1000
+    placement=[float(args.get(f"place_{k}_mm",0))/1000 for k in "xyz"]
+    if expected<0 or not all(math.isfinite(v) for v in [expected,*placement]):
+        raise RuntimeError("Dimension values and placement must be finite; the distance cannot be negative.")
+    name=sketch_name_for_object(doc,sketch)
+    original_reference=persistent_reference_id(doc,sketch)
+    require_selection(doc,{"sketch_points":indices})
+    method=f"AddAlong{coordinate}Dimension"
+    try:
+        with dimension_dialog_suppressed(app):
+            display=getattr(flag_methods(sketch_manager(doc),method),method)(*placement)
+        if display is None:
+            return result(False,"SOLIDWORKS did not create the projected 3D dimension.",axis=axis,projected_before_mm=before_distance*1000)
+        dimension=flag_methods(display,"GetDimension2").GetDimension2(0)
+        if dimension is None:
+            return result(False,"Display dimension created, but its native dimension is unavailable.",axis=axis)
+        full_name=str(value(dimension,"FullName"))
+        display_type=int(value(display,"Type2"))
+        code=0
+        if args.get("value_mm") is not None:
+            code=int(flag_methods(dimension,"SetSystemValue3").SetSystemValue3(expected,2,empty_variant()))
+    finally:
+        clear_selection(doc)
+    rebuilt=rebuild(doc)
+    context=doc.SketchManager.ActiveSketch
+    if context is None:
+        reopened=edit_sketch({"sketch_name":name})
+        context=doc.SketchManager.ActiveSketch
+        restored=bool(reopened["ok"]) and context is not None and persistent_reference_id(doc,context)==original_reference
+    else:
+        restored=bool(value(context,"Is3D")) and persistent_reference_id(doc,context)==original_reference
+    actual=float(value(dimension,"SystemValue"))
+    after={persistent_reference_id(doc,p):p for p in sketch_point_objects(doc,name)}
+    same_points=all(r in after for r in references)
+    distance=abs(float(value(after[references[1]],coordinate))-float(value(after[references[0]],coordinate))) if same_points else None
+    confirmed=rebuilt and restored and display_type==2 and code==0 and abs(actual-expected)<=1e-9 and distance is not None and abs(distance-expected)<=1e-5
+    return result(confirmed,"Created and verified a projected 3D dimension." if confirmed else "Dimension created, but its value, geometry or edit context could not be confirmed.",
+                  axis=axis,full_name=full_name,value_mm=actual*1000,projected_distance_mm=distance*1000 if distance is not None else None,
+                  display_type=display_type,set_value_status=code,rebuild_ok=rebuilt,edit_context_restored=restored,point_references_confirmed=same_points)
+
+
 @tool(
     "set_dimension",
     "Change an existing dimension by its full name, for example 'D1@草图1'. Use list_dimensions to "
