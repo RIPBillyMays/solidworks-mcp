@@ -47,6 +47,15 @@ class SpatialConvertTests(unittest.TestCase):
         with patch.object(sketch,"_require_open_sketch",return_value=(None,NS(SketchUseEdge3=lambda *a:True))),patch.object(sketch,"_segment_count",return_value=0),patch.object(sketch,"require_selection"),patch.object(sketch,"sketch_segment_objects",return_value=[]):
             self.assertFalse(sketch.convert_entities({"selection":{"edges":[0]}})["ok"])
 
+    def test_conversion_identifies_new_curves_when_native_order_changes(self):
+        old=NS(reference=b"old",GetCurve=lambda:None)
+        new=NS(reference=b"new",GetCurve=lambda:NS(),GetLength=lambda:.01,GetType=lambda:1)
+        with patch.object(sketch,"_require_open_sketch",return_value=(None,NS(SketchUseEdge3=lambda *a:True))),patch.object(sketch,"sketch_segment_objects",side_effect=[[old],[new,old]]),patch.object(sketch,"persistent_reference_id",side_effect=lambda doc,obj:obj.reference),patch.object(sketch,"require_selection"):
+            payload=sketch.convert_entities({"selection":{"edges":[0]}})
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["data"]["segments_added"],1)
+        self.assertIsNone(payload["data"]["geometry_correspondence_confirmed"])
+
     def test_conversion_checks_transformed_samples_and_rejects_wrong_output(self):
         matrix=[1,0,0,0,1,0,0,0,1,0,0,.035,1,0,0,0]
         identity=[1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0]
@@ -57,7 +66,7 @@ class SpatialConvertTests(unittest.TestCase):
             nearest=Mock(side_effect=lambda x,y,z:[x+error,y,z])
             output=NS(GetCurve=lambda:NS(GetClosestPointOn=nearest),GetLength=lambda:length,GetType=lambda:0)
             manager=NS(ActiveSketch=target_sketch,SketchUseEdge3=lambda *a:True)
-            with patch.object(sketch,"_require_open_sketch",return_value=(None,manager)),patch.object(sketch,"_segment_count",return_value=0),patch.object(sketch,"sketch_segment_objects",side_effect=[[source],[output]]),patch.object(sketch,"resolve_sketch",return_value=("Source",NS(GetSpecificFeature2=lambda:source_sketch))),patch.object(sketch,"_curve_samples",return_value=[[0,0,0],[.01,0,0]]),patch.object(sketch,"require_selection"),patch.object(sketch,"flag_methods",side_effect=lambda o,*a:o):
+            with patch.object(sketch,"_require_open_sketch",return_value=(None,manager)),patch.object(sketch,"_segment_count",return_value=0),patch.object(sketch,"sketch_segment_objects",side_effect=[[],[source],[output]]),patch.object(sketch,"resolve_sketch",return_value=("Source",NS(GetSpecificFeature2=lambda:source_sketch))),patch.object(sketch,"_curve_samples",return_value=[[0,0,0],[.01,0,0]]),patch.object(sketch,"require_selection"),patch.object(sketch,"flag_methods",side_effect=lambda o,*a:o):
                 payload=sketch.convert_entities({"selection":{"sketch_name":"Source","sketch_segments":[0]},"chain":False})
             self.assertEqual(payload["ok"],ok)
             self.assertEqual(payload["data"]["geometry_correspondence_confirmed"],ok)

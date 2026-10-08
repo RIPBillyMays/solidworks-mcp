@@ -815,7 +815,10 @@ def _curve_samples(curve):
       {"selection": SELECTION_SCHEMA,"chain": {"type":"boolean","default":True},"inner_loops":{"type":"boolean","default":False}},["selection"])
 def convert_entities(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
-    before = _segment_count(doc)
+    existing=sketch_segment_objects(doc)
+    before={persistent_reference_id(doc,s) for s in existing}
+    if b"" in before:
+        raise RuntimeError("Cannot identify existing target curves before conversion.")
     spec=args["selection"]
     expected=[]
     expected_length=0.
@@ -840,7 +843,7 @@ def convert_entities(args: dict[str, Any]) -> dict[str, Any]:
             expected_length+=length
     require_selection(doc, args["selection"])
     ok = bool(manager.SketchUseEdge3(bool(args.get("chain", True)), bool(args.get("inner_loops", False))))
-    segments=sketch_segment_objects(doc)[before:]
+    segments=[s for s in sketch_segment_objects(doc) if not before or persistent_reference_id(doc,s) not in before]
     valid=all(value(s,"GetCurve") is not None and float(value(s,"GetLength")) > 0 for s in segments)
     confirmed=ok and bool(segments) and valid
     correspondence=None

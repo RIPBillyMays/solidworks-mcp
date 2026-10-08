@@ -326,6 +326,7 @@ async def protocol(install, expected, catalog, scratch):
                         raise RuntimeError("Installed MCP ellipse geometry differs.")
                     await call("close_sketch")
                     await call("create_3d_sketch", {"name": "InstalledSpatialConverted"})
+                    await call("draw_line", {"x1_mm": 100, "y1_mm": 100, "z1_mm": 100, "x2_mm": 110, "y2_mm": 100, "z2_mm": 100})
                     converted = await call("convert_entities", {"selection": {"sketch_name": "InstalledSpatialSource", "sketch_segments": [0,1]}, "chain": False})
                     if converted["native_types"] != [1,3] or not converted["geometry_correspondence_confirmed"] or converted["max_source_point_gap_mm"] > .01:
                         raise RuntimeError("Installed MCP spatial circle/ellipse conversion differs.")

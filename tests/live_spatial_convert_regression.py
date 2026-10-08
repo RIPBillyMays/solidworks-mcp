@@ -23,6 +23,7 @@ def run():
             ellipse=call("draw_ellipse",center_x_mm=0,center_y_mm=0,major_x_mm=10/math.sqrt(2),major_y_mm=10/math.sqrt(2),minor_x_mm=-5/math.sqrt(2),minor_y_mm=5/math.sqrt(2))
             assert abs(ellipse["length_mm"]-48.4422411027)<.001
             call("close_sketch");call("create_3d_sketch",name="SpatialCurves")
+            call("draw_line",x1_mm=100,y1_mm=100,z1_mm=100,x2_mm=110,y2_mm=100,z2_mm=100)
             converted=call("convert_entities",selection={"sketch_name":"SourceCurves","sketch_segments":[0,1]},chain=False)
             assert converted["geometry_correspondence_confirmed"] and converted["max_source_point_gap_mm"]<.01
             assert converted["native_types"]==[1,3]
@@ -32,7 +33,7 @@ def run():
             params=list(value(value(circle,"GetCurve"),"CircleParams"))
             assert abs(abs(params[axis+3])-1)<1e-6,params
             if plane=="offset": assert abs(abs(params[2]*1000)-5)<.001,params
-            assert abs(sum(float(value(s,"GetLength"))*1000 for s in segments)-(4*math.pi+48.4422411027))<.01
+            assert abs(sum(float(value(s,"GetLength"))*1000 for s in segments)-(10+4*math.pi+48.4422411027))<.01
             count=len(segments)
             try:
                 HANDLERS["draw_ellipse"](dict(center_x_mm=0,center_y_mm=0,major_x_mm=10,major_y_mm=0,minor_x_mm=0,minor_y_mm=5))
