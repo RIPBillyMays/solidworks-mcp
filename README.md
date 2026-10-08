@@ -155,7 +155,11 @@ parallel-through-point), `create_axis`.
 `list_sketch_points` 包含内部点与用户点，返回选择索引、类型和草图/模型坐标。
 `draw_centerline` 支持 XYZ 构造线，并核验端点与构造属性；`draw_3point_arc` 支持
 三点 XYZ 圆弧，核验半径、弧长、端点和点到曲线距离，共线/重合输入在创建前拒绝。
-重叠/共端点圆弧原生结果曾偏离输入，返回未确认状态。3D 椭圆原生对象未得到有效曲线，
+重叠/共端点圆弧原生结果曾偏离输入，返回未确认状态。圆/椭圆可在 2D 平面草图创建后
+用 `convert_entities` 转换成空间曲线；转换逐点比较源曲线经坐标变换后的采样点与输出，
+并读取实际类型，椭圆在本机变为样条。`draw_ellipse` 核验理论点和周长，直接 3D 创建会
+产生无有效曲线的原生对象，因此在修改前拒绝。模型边/面与部分圆弧等输入的完整对应
+几何核验仍未覆盖；返回的 `geometry_correspondence_confirmed` 明确区分已核验与未核验。
 其他 3D 曲线、工作平面、完整约束/尺寸与更多建模组合仍有缺口。
 
 Geometry: `draw_line`, `draw_centerline`, `draw_circle`, `draw_rectangle`,

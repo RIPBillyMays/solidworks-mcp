@@ -492,7 +492,7 @@ def draw_3point_arc(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "draw_ellipse",
-    "Add an ellipse from its centre, a major-axis point, and a minor-axis point. Millimetres.",
+    "Add a verified full ellipse in an open 2D sketch. Center and perpendicular major/minor axis points are mm. Verifies 24 theoretical points and perimeter; direct native 3D creation is unsupported, so use a plane sketch and convert_entities for spatial geometry (native spline representation).",
     {
         "center_x_mm": {"type": "number"}, "center_y_mm": {"type": "number"},
         "major_x_mm": {"type": "number"}, "major_y_mm": {"type": "number"},
@@ -501,14 +501,38 @@ def draw_3point_arc(args: dict[str, Any]) -> dict[str, Any]:
     ["center_x_mm", "center_y_mm", "major_x_mm", "major_y_mm", "minor_x_mm", "minor_y_mm"],
 )
 def draw_ellipse(args: dict[str, Any]) -> dict[str, Any]:
+    points = [_xyz(args, f"{p}_x_mm", f"{p}_y_mm") for p in ("center", "major", "minor")]
+    center, major, minor = points
+    u, v = [[q-p for p,q in zip(center,point)] for point in (major,minor)]
+    a, b = math.dist(center, major), math.dist(center, minor)
+    if min(a,b) <= 1e-9 or a < b or abs(sum(x*y for x,y in zip(u,v))) > a*b*1e-8:
+        raise RuntimeError("Ellipse axes must be nonzero, perpendicular, with major radius at least the minor radius.")
     doc, manager = _require_open_sketch()
+    if bool(value(_active_sketch(doc), "Is3D")):
+        raise RuntimeError("Native CreateEllipse requires a 2D sketch. Create it on a plane and convert the segment into a 3D sketch instead.")
     before = _segment_count(doc)
-    manager.CreateEllipse(
-        to_m(args["center_x_mm"]), to_m(args["center_y_mm"]), 0.0,
-        to_m(args["major_x_mm"]), to_m(args["major_y_mm"]), 0.0,
-        to_m(args["minor_x_mm"]), to_m(args["minor_y_mm"]), 0.0,
-    )
-    return _drawn(doc, before, "an ellipse")
+    segment = _create_without_inference(manager,"CreateEllipse",*(q for p in points for q in p))
+    payload = _drawn(doc, before, "an ellipse")
+    if not payload["ok"]:
+        return payload
+    curve = value(segment,"GetCurve") if segment is not None else None
+    if curve is None:
+        return result(False,"Ellipse appeared, but its native curve could not be confirmed.")
+    flag_methods(curve,"GetClosestPointOn")
+    gaps=[]
+    for i in range(24):
+        angle=2*math.pi*i/24
+        p=[center[k]+u[k]*math.cos(angle)+v[k]*math.sin(angle) for k in range(3)]
+        gaps.append(math.dist(p,[float(q) for q in as_list(curve.GetClosestPointOn(*p))[:3]]))
+    # Simpson integration of the independent theoretical perimeter.
+    n=256
+    h=2*math.pi/n
+    speeds=[math.sqrt(a*a*math.sin(i*h)**2+b*b*math.cos(i*h)**2) for i in range(n+1)]
+    expected=h/3*(speeds[0]+speeds[-1]+4*sum(speeds[1:-1:2])+2*sum(speeds[2:-1:2]))
+    length=float(value(segment,"GetLength"))
+    confirmed=max(gaps)<=1e-5 and abs(length-expected)<=1e-5
+    return result(confirmed,"Created and verified an ellipse." if confirmed else "Ellipse created, but requested geometry could not be confirmed.",
+                  length_mm=length*1000,max_point_gap_mm=max(gaps)*1000)
 
 
 @tool(
@@ -773,21 +797,64 @@ def sketch_mirror(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, "Mirrored the sketch entities.")
 
 
-@tool(
-    "convert_entities",
-    "Project the selected model edges or a face's loops onto the open sketch (Convert Entities).",
-    {
-        "selection": SELECTION_SCHEMA,
-        "chain": {"type": "boolean", "default": True},
-        "inner_loops": {"type": "boolean", "default": False},
-    },
-    ["selection"],
-)
+def _curve_samples(curve):
+    import pythoncom
+    import win32com.client
+    flag_methods(curve,"GetEndParams","Evaluate2")
+    refs=[win32com.client.VARIANT(pythoncom.VT_BYREF|t,v) for t,v in
+          ((pythoncom.VT_R8,0.),(pythoncom.VT_R8,0.),(pythoncom.VT_BOOL,False),(pythoncom.VT_BOOL,False))]
+    if not curve.GetEndParams(*refs):
+        raise RuntimeError("Cannot read native curve parameter bounds.")
+    start,end=float(refs[0].value),float(refs[1].value)
+    if not all(math.isfinite(x) for x in (start,end)) or end<=start:
+        raise RuntimeError("Native curve bounds are invalid.")
+    return [[float(q) for q in as_list(curve.Evaluate2(start+(end-start)*i/24,0))[:3]] for i in range(25)]
+
+
+@tool("convert_entities", "Convert selected edges, face loops or source sketch segments into the open 2D/3D sketch. Verifies new native curves; supported sketch-segment inputs additionally compare 25 transformed source samples and total length with chain=false. Reports ellipse-to-spline native representation and unverified correspondence explicitly.",
+      {"selection": SELECTION_SCHEMA,"chain": {"type":"boolean","default":True},"inner_loops":{"type":"boolean","default":False}},["selection"])
 def convert_entities(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
+    before = _segment_count(doc)
+    spec=args["selection"]
+    expected=[]
+    expected_length=0.
+    supported=False
+    if spec.get("sketch_segments") and set(spec)<= {"sketch_name","sketch_segments"}:
+        source_segments=sketch_segment_objects(doc,spec.get("sketch_name"))
+        source_sketch = value(resolve_sketch(doc,spec["sketch_name"])[1],"GetSpecificFeature2") if spec.get("sketch_name") else manager.ActiveSketch
+        source_to_model=value(value(value(source_sketch,"ModelToSketchTransform"),"Inverse"),"ArrayData")
+        model_to_target=value(value(manager.ActiveSketch,"ModelToSketchTransform"),"ArrayData")
+        supported=True
+        for index in dict.fromkeys(spec["sketch_segments"]):
+            if not 0<=int(index)<len(source_segments):
+                raise RuntimeError("Source sketch segment index is out of range.")
+            segment=source_segments[int(index)]
+            length=float(value(segment,"GetLength"))
+            curve=value(segment,"GetCurve")
+            kind=int(value(segment,"GetType"))
+            if curve is None or kind not in (0,1,2,3) or (kind==1 and not math.isclose(length,2*math.pi*float(value(segment,"GetRadius")),abs_tol=1e-8)):
+                supported=False
+                break
+            expected.extend(apply_transform(apply_transform(p,source_to_model),model_to_target) for p in _curve_samples(curve))
+            expected_length+=length
     require_selection(doc, args["selection"])
     ok = bool(manager.SketchUseEdge3(bool(args.get("chain", True)), bool(args.get("inner_loops", False))))
-    return result(ok, "Converted the selected entities into the sketch." if ok else "SOLIDWORKS did not convert the selection.")
+    segments=sketch_segment_objects(doc)[before:]
+    valid=all(value(s,"GetCurve") is not None and float(value(s,"GetLength")) > 0 for s in segments)
+    confirmed=ok and bool(segments) and valid
+    correspondence=None
+    gap_mm=None
+    if confirmed and supported and expected:
+        curves=[flag_methods(value(s,"GetCurve"),"GetClosestPointOn") for s in segments]
+        gap_mm=1000*max(min(math.dist(p,[float(q) for q in as_list(c.GetClosestPointOn(*p))[:3]]) for c in curves) for p in expected)
+        actual_length=sum(float(value(s,"GetLength")) for s in segments)
+        length_matches=actual_length>=expected_length-1e-5 if args.get("chain",True) else abs(actual_length-expected_length)<=1e-5
+        correspondence=gap_mm<=.01 and length_matches
+        confirmed=confirmed and correspondence
+    return result(confirmed, "Converted and verified native output curves." if confirmed else "Conversion or native output curves could not be confirmed.",
+                  native_accepted=ok,segments_added=len(segments),native_types=[int(value(s,"GetType")) for s in segments],
+                  geometry_correspondence_confirmed=correspondence,max_source_point_gap_mm=gap_mm)
 
 
 @tool(

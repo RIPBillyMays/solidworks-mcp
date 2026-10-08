@@ -319,6 +319,17 @@ async def protocol(install, expected, catalog, scratch):
                         if abs(arc["radius_mm"]-5) > .01 or abs(arc["length_mm"]-5*angle) > .01 or arc["max_point_gap_mm"] > .01:
                             raise RuntimeError("Installed MCP spatial arc geometry differs.")
                     await call("close_sketch")
+                    await call("create_sketch", {"plane": "right", "name": "InstalledSpatialSource"})
+                    await call("draw_circle", {"x_mm": 240, "y_mm": 20, "radius_mm": 2})
+                    ellipse = await call("draw_ellipse", {"center_x_mm": 210, "center_y_mm": 20, "major_x_mm": 220, "major_y_mm": 20, "minor_x_mm": 210, "minor_y_mm": 25})
+                    if abs(ellipse["length_mm"]-48.4422411027) > .01 or ellipse["max_point_gap_mm"] > .01:
+                        raise RuntimeError("Installed MCP ellipse geometry differs.")
+                    await call("close_sketch")
+                    await call("create_3d_sketch", {"name": "InstalledSpatialConverted"})
+                    converted = await call("convert_entities", {"selection": {"sketch_name": "InstalledSpatialSource", "sketch_segments": [0,1]}, "chain": False})
+                    if converted["native_types"] != [1,3] or not converted["geometry_correspondence_confirmed"] or converted["max_source_point_gap_mm"] > .01:
+                        raise RuntimeError("Installed MCP spatial circle/ellipse conversion differs.")
+                    await call("close_sketch")
             finally:
                 if sketch3d_title:
                     await call("close_document", {"name": sketch3d_title, "discard_changes": True})
