@@ -64,6 +64,7 @@ async def protocol(install, expected, catalog, scratch):
             wrap_title = None
             dome_title = None
             sketch3d_title = None
+            dimension_title = None
             try:
                 if scratch:
                     title = (await call("create_new_document", {"kind": "part"}))["document"]["title"]
@@ -333,18 +334,30 @@ async def protocol(install, expected, catalog, scratch):
                     await call("close_sketch")
                     await call("create_3d_sketch", {"name": "InstalledAxisDimensions"})
                     await call("draw_line", {"x1_mm":0,"y1_mm":0,"x2_mm":10,"y2_mm":20,"z2_mm":30})
+                    refused=await rejected_call("add_3d_dimension", {"axis":"x","point_indices":[0,1],"value_mm":15,"place_x_mm":50,"place_y_mm":50,"place_z_mm":50})
+                    if not refused["selected_references_confirmed"] or refused["projected_before_mm"]!=10 or (await call("list_dimensions", {"feature_name":"InstalledAxisDimensions"}))["dimensions"]:
+                        raise RuntimeError("Installed MCP converted-model refusal differs or created an unreported dimension.")
+                    await call("close_sketch")
+                    dimension_title=(await call("create_new_document", {"kind":"part"}))["document"]["title"]
+                    await call("create_3d_sketch", {"name":"InstalledAxisDimensions"})
+                    await call("draw_line", {"x1_mm":0,"y1_mm":0,"x2_mm":10,"y2_mm":20,"z2_mm":30})
                     names=[]
                     for axis,target in zip("xyz",(15,25,35)):
                         added=await call("add_3d_dimension", {"axis":axis,"point_indices":[0,1],"value_mm":target,"place_x_mm":50,"place_y_mm":50,"place_z_mm":50})
                         if not added["edit_context_restored"] or not added["point_references_confirmed"] or abs(added["projected_distance_mm"]-target)>.01:
                             raise RuntimeError("Installed MCP axis dimension or driven geometry differs.")
                         names.append(added["full_name"])
+                    dimension_info=(await call("list_dimensions", {"feature_name":"InstalledAxisDimensions"}))["dimensions"]
+                    if len(dimension_info)!=3 or any(d["driven"] or d["driven_state"]!=2 for d in dimension_info):
+                        raise RuntimeError("Installed MCP driving dimension state readback differs.")
                     await call("close_sketch")
                     await call("set_dimension", {"full_name":names[0],"value_mm":18})
                     positions=(await call("list_sketch_points", {"sketch_name":"InstalledAxisDimensions"}))["points"]
                     if abs(abs(positions[1]["model_point_mm"][0]-positions[0]["model_point_mm"][0])-18)>.01:
                         raise RuntimeError("Installed MCP later dimension edit did not drive spatial geometry.")
             finally:
+                if dimension_title:
+                    await call("close_document", {"name":dimension_title,"discard_changes":True})
                 if sketch3d_title:
                     await call("close_document", {"name": sketch3d_title, "discard_changes": True})
                 if dome_title:

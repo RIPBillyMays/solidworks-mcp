@@ -1122,10 +1122,15 @@ def add_3d_dimension(args):
     require_selection(doc,{"sketch_points":indices})
     method=f"AddAlong{coordinate}Dimension"
     try:
+        selection=flag_methods(doc.SelectionManager,"GetSelectedObjectCount2","GetSelectedObject6")
+        selected_references=[persistent_reference_id(doc,selection.GetSelectedObject6(i,-1)) for i in range(1,selection.GetSelectedObjectCount2(-1)+1)]
+        if selected_references!=references:
+            return result(False,"Native selection did not retain the requested point references.",axis=axis,selected_references_confirmed=False)
         with dimension_dialog_suppressed(app):
             display=getattr(flag_methods(sketch_manager(doc),method),method)(*placement)
         if display is None:
-            return result(False,"SOLIDWORKS did not create the projected 3D dimension.",axis=axis,projected_before_mm=before_distance*1000)
+            return result(False,"SOLIDWORKS did not create the projected 3D dimension.",axis=axis,projected_before_mm=before_distance*1000,
+                          selected_references_confirmed=True,sketch_status=_sketch_status(doc))
         dimension=flag_methods(display,"GetDimension2").GetDimension2(0)
         if dimension is None:
             return result(False,"Display dimension created, but its native dimension is unavailable.",axis=axis)
@@ -1196,7 +1201,7 @@ def set_dimension(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "list_dimensions",
-    "Read-only: list every driving dimension in the document, or only those of one feature/sketch, "
+    "Read-only: list native driving/driven display dimensions in the document, or only those of one feature/sketch. Reports driven_state 0=unknown, 1=driven, 2=driving, "
     "with the full names that set_dimension takes.",
     {"feature_name": {"type": "string", "description": "Restrict to one feature or sketch."}},
 )
@@ -1225,7 +1230,8 @@ def list_dimensions(args: dict[str, Any]) -> dict[str, Any]:
                     "owner": owner,
                     "full_name": full_name,
                     "name": str(safe(dimension, "Name", "")),
-                    "driven": bool(safe(dimension, "DrivenState", 1) == 2),
+                    "driven": bool(safe(dimension, "DrivenState", 0) == 1),
+                    "driven_state": int(safe(dimension, "DrivenState", 0)),
                 }
                 # Dimension type 3 is angular in swDimensionType_e; everything
                 # else we surface here is a length.

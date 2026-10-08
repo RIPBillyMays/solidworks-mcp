@@ -164,6 +164,9 @@ parallel-through-point), `create_axis`.
 `add_3d_dimension` 用两个原生点索引创建 X/Y/Z 投影尺寸；重建求解后恢复原草图编辑，
 核验线性尺寸、点的持久引用及实际轴向距离。零件 XYZ 和装配体 XY 实测通过；
 本机装配体 Z 接口返回空，明确失败并保留缺口。
+含 3D 圆/椭圆转换的零件中，后续 X 尺寸也出现原生拒绝，仍为缺口；原生点选择前
+验证持久引用，避免把选择成功当成选中了正确点。`list_dimensions` 保留原生状态值：
+0 未知、1 从动、2 驱动，并修正 `driven` 标记。
 
 Geometry: `draw_line`, `draw_centerline`, `draw_circle`, `draw_rectangle`,
 `draw_arc`, `draw_3point_arc`, `draw_ellipse`, `draw_polygon`, `draw_slot`,
