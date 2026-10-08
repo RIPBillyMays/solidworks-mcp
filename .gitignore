@@ -10,3 +10,6 @@ HANDOFF.md
 STATUS.md
 build/
 dist/
+
+# Live-test file I/O (ADR-0005)
+sandbox/
