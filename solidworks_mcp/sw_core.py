@@ -372,6 +372,7 @@ _MODEL_DOC_METHODS = (
     # IModelDoc2
     "ClearSelection2", "InsertSketch2", "SketchFillet2", "SketchChamfer", "SketchMirror", "SketchOffset2",
     "InsertFeatureShell", "InsertAxis2", "ShowNamedView2", "Parameter", "Save3", "SaveAs",
+    "Insert3DSketch2", "Insert3DSketch",
     # IPartDoc
     "SetMaterialPropertyName2", "GetMaterialPropertyName2", "GetPartBox", "GetBodies2",
     # IAssemblyDoc
@@ -468,6 +469,12 @@ def byref_double(initial: float = 0) -> Any:
 
 def byref_dispatch() -> Any:
     return win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_DISPATCH, None)
+
+
+def persistent_reference_id(doc: Any, obj: Any) -> bytes:
+    raw = flag_methods(value(doc, "Extension"), "GetPersistReference3").GetPersistReference3(obj)
+    # Freeze native memoryviews before a rollback, rebuild or edit changes them.
+    return bytes(raw) if raw is not None else b""
 
 
 def as_list(com_array: Any) -> list[Any]:
@@ -673,7 +680,7 @@ def reference_axes(doc: Any) -> list[str]:
 
 
 def sketch_features(doc: Any) -> list[Any]:
-    return [f for f in iter_feature_objects(doc) if feature_property(f, "GetTypeName2", "") == "ProfileFeature"]
+    return [f for f in iter_feature_objects(doc) if feature_property(f, "GetTypeName2", "") in ("ProfileFeature", "3DProfileFeature")]
 
 
 def sketch_names(doc: Any) -> list[str]:
@@ -689,27 +696,42 @@ def latest_sketch(doc: Any) -> tuple[str, Any]:
     return str(feature_property(feature, "Name", "")), feature
 
 
+def sketch_name_for_object(doc: Any, sketch: Any) -> str:
+    reference = persistent_reference_id(doc, sketch)
+    if reference:
+        for feature in sketch_features(doc):
+            specific = value(feature, "GetSpecificFeature2")
+            if specific is not None and persistent_reference_id(doc, specific) == reference:
+                return str(value(feature, "Name"))
+    raise RuntimeError("Cannot identify the active sketch feature from its native reference.")
+
+
 def resolve_sketch(doc: Any, sketch_name: str | None) -> tuple[str, Any]:
     """Resolve an explicit sketch name, or fall back to the newest sketch."""
     if sketch_name:
         feature = find_feature(doc, sketch_name)
         if feature is None:
             raise RuntimeError(f"No feature named '{sketch_name}' exists in this document.")
-        if feature_property(feature, "GetTypeName2", "") != "ProfileFeature":
+        if feature_property(feature, "GetTypeName2", "") not in ("ProfileFeature", "3DProfileFeature"):
             raise RuntimeError(f"Feature '{sketch_name}' is not a sketch.")
         return sketch_name, feature
     return latest_sketch(doc)
 
 
+def toggle_sketch(doc: Any, is_3d: bool) -> None:
+    if is_3d:
+        flag_methods(doc, "Insert3DSketch2", "Insert3DSketch")
+        call_versioned(doc, ("Insert3DSketch2", (True,)), ("Insert3DSketch", ()))
+    else:
+        sketch_manager(doc).InsertSketch(True)
+
+
 def exit_active_sketch(doc: Any) -> None:
-    try:
+    active = doc.SketchManager.ActiveSketch
+    if active is not None:
+        toggle_sketch(doc, bool(value(active, "Is3D")))
         if doc.SketchManager.ActiveSketch is not None:
-            sketch_manager(doc).InsertSketch(True)
-    except Exception:
-        try:
-            doc.InsertSketch2(True)
-        except Exception:
-            pass
+            raise RuntimeError("SOLIDWORKS did not close the active sketch.")
 
 
 def select_sketch_for_feature(doc: Any, sketch_name: str | None) -> str:
@@ -1155,9 +1177,7 @@ def enumerate_sketch_segments(doc: Any, sketch_name: str | None = None) -> tuple
             raise RuntimeError("The drawing has no active sketch. Activate a view first.")
         resolved_name = "<active drawing view>"
     elif sketch is not None and not sketch_name:
-        # ISketch has no accessor back to its feature in this type library, and
-        # the open sketch is always the newest ProfileFeature in the tree.
-        resolved_name, _ = latest_sketch(doc)
+        resolved_name = sketch_name_for_object(doc, sketch)
     else:
         resolved_name, feature = resolve_sketch(doc, sketch_name)
         sketch = value(feature, "GetSpecificFeature2")

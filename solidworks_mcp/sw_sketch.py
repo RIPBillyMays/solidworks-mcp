@@ -22,9 +22,16 @@ afterthought.
 from __future__ import annotations
 
 from typing import Any
+import math
 
 from .sw_core import (
     active_document,
+    apply_transform,
+    document_type,
+    exit_active_sketch,
+    sketch_features,
+    sketch_name_for_object,
+    persistent_reference_id,
     sketch_point_objects,
     dispatch_array,
     empty_variant,
@@ -51,6 +58,7 @@ from .sw_core import (
     select_by_id,
     sketch_manager,
     sketch_names,
+    toggle_sketch,
     sketch_segment_objects,
     tool,
     to_deg,
@@ -138,6 +146,8 @@ def _require_open_sketch() -> tuple[Any, Any]:
 )
 def create_sketch(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = require_part()
+    if doc.SketchManager.ActiveSketch is not None:
+        return result(False, "A sketch is already open. Close it before creating another sketch.")
     face_index = args.get("face_index")
     if face_index is not None:
         require_selection(doc, {"faces": [int(face_index)]})
@@ -166,6 +176,31 @@ def create_sketch(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, f"Opened a sketch on {target}.", sketch=created, target=target)
 
 
+@tool("create_3d_sketch", "Create and open a new native 3D sketch in the active part or assembly. No plane is needed; geometry coordinates are model-space millimetres. Refuses to toggle an already-open sketch. Verifies native Is3D and the new feature before reporting success.",
+      {"name": {"type": "string", "minLength": 1}})
+def create_3d_sketch(args):
+    _, doc = active_document()
+    if document_type(doc) not in (1, 2):
+        raise RuntimeError("3D sketches require a part or assembly document.")
+    if doc.SketchManager.ActiveSketch is not None:
+        return result(False, "A sketch is already open. Close it before creating another sketch.")
+    before = set(sketch_names(doc))
+    clear_selection(doc)
+    toggle_sketch(doc, True)
+    active = doc.SketchManager.ActiveSketch
+    if active is None or not bool(value(active, "Is3D")):
+        return result(False, "SOLIDWORKS did not open a native 3D sketch.")
+    name, feature = latest_sketch(doc)
+    if name in before or safe(feature, "GetTypeName2") != "3DProfileFeature":
+        return result(False, "Could not confirm a new native 3D sketch feature.", sketch=name)
+    if args.get("name"):
+        feature.Name = args["name"]
+        if str(value(feature, "Name")) != args["name"]:
+            return result(False, "3D sketch created, but its requested name was not retained.", sketch=str(value(feature, "Name")))
+        name = args["name"]
+    return result(True, "Opened a native 3D sketch.", sketch=name, is_3d=True)
+
+
 @tool(
     "edit_sketch",
     "Reopen an existing sketch for editing by name.",
@@ -173,13 +208,23 @@ def create_sketch(args: dict[str, Any]) -> dict[str, Any]:
     ["sketch_name"],
 )
 def edit_sketch(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_part()
-    name, _ = resolve_sketch(doc, str(args["sketch_name"]))
+    _, doc = active_document()
+    if document_type(doc) not in (1, 2):
+        raise RuntimeError("Named sketch editing currently requires a part or assembly.")
+    if doc.SketchManager.ActiveSketch is not None:
+        return result(False, "A sketch is already open. Close it before editing another sketch.")
+    name, feature = resolve_sketch(doc, str(args["sketch_name"]))
+    specific = value(feature, "GetSpecificFeature2")
+    is_3d = bool(value(specific, "Is3D"))
+    expected = persistent_reference_id(doc, specific)
     clear_selection(doc)
     if not select_by_id(doc, name, "SKETCH"):
         return result(False, f"Could not select sketch '{name}'.")
-    sketch_manager(doc).InsertSketch(True)
-    return result(True, f"Reopened sketch '{name}' for editing.", sketch=name)
+    toggle_sketch(doc, is_3d)
+    active = doc.SketchManager.ActiveSketch
+    confirmed = active is not None and bool(value(active, "Is3D")) == is_3d and bool(expected) and persistent_reference_id(doc, active) == expected
+    return result(confirmed, f"Reopened sketch '{name}' for editing." if confirmed else "Could not confirm the requested sketch edit context.",
+                  sketch=name, is_3d=is_3d, reference_confirmed=confirmed)
 
 
 @tool("close_sketch", "Exit the open sketch without creating a feature.", {})
@@ -189,18 +234,42 @@ def close_sketch(args: dict[str, Any]) -> dict[str, Any]:
         return result(False, "No sketch is open.")
     name = ""
     try:
-        name, _ = latest_sketch(doc)
+        name = sketch_name_for_object(doc, doc.SketchManager.ActiveSketch)
     except Exception:
         pass
-    sketch_manager(doc).InsertSketch(True)
-    return result(True, "Closed the open sketch.", sketch=name)
+    is_3d = bool(value(doc.SketchManager.ActiveSketch, "Is3D"))
+    exit_active_sketch(doc)
+    return result(True, "Closed the open sketch.", sketch=name, is_3d=is_3d)
 
 
 @tool("list_sketches", "Read-only: list every sketch feature in the active document.", {})
 def list_sketches(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = active_document()
     open_sketch = doc.SketchManager.ActiveSketch is not None
-    return result(True, "Read sketches.", sketches=sketch_names(doc), sketch_open=open_sketch)
+    details = [{"name": str(value(f, "Name")), "is_3d": bool(value(value(f, "GetSpecificFeature2"), "Is3D"))} for f in sketch_features(doc)]
+    return result(True, "Read sketches.", sketches=sketch_names(doc), sketch_details=details, sketch_open=open_sketch)
+
+
+@tool("list_sketch_points", "Read all native points of the open or named 2D/3D sketch with selection indices, native point types and sketch/model-space coordinates in mm. Includes generated endpoints/centers, so point indices match selection specs; user points have native type 1. Drawing-sketch enumeration remains pending.",
+      {"sketch_name": {"type": "string"}})
+def list_sketch_points(args):
+    _, doc = active_document()
+    if document_type(doc) not in (1, 2):
+        raise RuntimeError("Point enumeration currently requires a part or assembly.")
+    active = doc.SketchManager.ActiveSketch
+    if args.get("sketch_name") or active is None:
+        name, feature = resolve_sketch(doc, args.get("sketch_name"))
+        sketch = value(feature, "GetSpecificFeature2")
+    else:
+        name = sketch_name_for_object(doc, active)
+        sketch = active
+    matrix = value(value(value(sketch, "ModelToSketchTransform"), "Inverse"), "ArrayData")
+    points = []
+    for index, point in enumerate(as_list(value(sketch, "GetSketchPoints2"))):
+        coords = [float(value(point, k)) for k in ("X", "Y", "Z")]
+        points.append({"index": index, "native_type": int(value(point, "Type")), "point_mm": [c * 1000 for c in coords],
+                       "model_point_mm": [c * 1000 for c in apply_transform(coords, matrix)]})
+    return result(True, "Read native sketch points.", sketch=name, is_3d=bool(value(sketch, "Is3D")), points=points)
 
 
 @tool(
@@ -222,22 +291,36 @@ def list_sketch_segments(args: dict[str, Any]) -> dict[str, Any]:
 _XY = {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}}
 
 
+def _xyz(args, x="x_mm", y="y_mm", z="z_mm"):
+    coords = [float(args[x]), float(args[y]), float(args.get(z, 0))]
+    if not all(math.isfinite(c) for c in coords):
+        raise RuntimeError("Sketch coordinates must be finite.")
+    return [c / 1000 for c in coords]
+
+
+def _check_z(doc, points):
+    if any(p[2] != 0 for p in points) and not bool(value(_active_sketch(doc), "Is3D")):
+        raise RuntimeError("Nonzero Z requires an open 3D sketch; 2D sketch coordinates lie in its XY plane.")
+
+
 @tool(
     "draw_line",
-    "Add a line to the open sketch. Coordinates are millimetres in sketch space.",
+    "Add a line to the open 2D/3D sketch. Coordinates are mm in sketch space (model space for 3D). Nonzero z1_mm/z2_mm requires a 3D sketch.",
     {
         "x1_mm": {"type": "number"}, "y1_mm": {"type": "number"},
         "x2_mm": {"type": "number"}, "y2_mm": {"type": "number"},
+        "z1_mm": {"type": "number", "default": 0}, "z2_mm": {"type": "number", "default": 0},
         "construction": {"type": "boolean", "default": False},
     },
     ["x1_mm", "y1_mm", "x2_mm", "y2_mm"],
 )
 def draw_line(args: dict[str, Any]) -> dict[str, Any]:
+    a, b = _xyz(args, "x1_mm", "y1_mm", "z1_mm"), _xyz(args, "x2_mm", "y2_mm", "z2_mm")
     doc, manager = _require_open_sketch()
+    _check_z(doc, [a, b])
     before = _segment_count(doc)
     segment = manager.CreateLine(
-        to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-        to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
+        *a, *b,
     )
     if segment is not None and bool(args.get("construction", False)):
         segment.ConstructionGeometry = True
@@ -423,14 +506,19 @@ def draw_slot(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "draw_point",
-    "Add a sketch point, useful as a pierce/coincident reference. Millimetres.",
-    dict(_XY),
+    "Add a point to the open 2D/3D sketch. Coordinates are mm in sketch space (model space for 3D). Nonzero z_mm requires a 3D sketch; reports actual coordinates.",
+    {**_XY, "z_mm": {"type": "number", "default": 0}},
     ["x_mm", "y_mm"],
 )
 def draw_point(args: dict[str, Any]) -> dict[str, Any]:
+    coords = _xyz(args)
     doc, manager = _require_open_sketch()
-    point = manager.CreatePoint(to_m(args["x_mm"]), to_m(args["y_mm"]), 0.0)
-    return result(bool(point), "Added a sketch point." if point else "SOLIDWORKS did not create the point.")
+    _check_z(doc, [coords])
+    point = manager.CreatePoint(*coords)
+    actual = [float(value(point, k)) for k in ("X", "Y", "Z")] if point is not None else None
+    confirmed = actual is not None and math.dist(actual, coords) <= 1e-5
+    return result(confirmed, "Added a sketch point." if confirmed else "Sketch point creation or coordinates could not be confirmed.",
+                  point_mm=[c * 1000 for c in actual] if actual is not None else None)
 
 
 @tool(
@@ -442,7 +530,7 @@ def draw_point(args: dict[str, Any]) -> dict[str, Any]:
             "minItems": 2,
             "items": {
                 "type": "object",
-                "properties": {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}},
+                "properties": {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}, "z_mm": {"type": "number", "default": 0}},
                 "required": ["x_mm", "y_mm"],
             },
         }
@@ -450,10 +538,12 @@ def draw_point(args: dict[str, Any]) -> dict[str, Any]:
     ["points"],
 )
 def draw_spline(args: dict[str, Any]) -> dict[str, Any]:
+    points = [_xyz(p) for p in args["points"]]
     doc, manager = _require_open_sketch()
+    _check_z(doc, points)
     flat: list[float] = []
-    for point in args["points"]:
-        flat.extend([to_m(point["x_mm"]), to_m(point["y_mm"]), 0.0])
+    for point in points:
+        flat.extend(point)
     from .sw_core import double_array
 
     before = _segment_count(doc)

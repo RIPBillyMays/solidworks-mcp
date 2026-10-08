@@ -6,7 +6,7 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-177 tools: sketching with real relations and driving dimensions, the solid
+179 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
 the model can see what it just built.
@@ -145,8 +145,15 @@ parallel-through-point), `create_axis`.
 `composite_curve` 将相连的草图、边或参考曲线生成组合曲线。
 
 ### Sketching
-`create_sketch` (on a plane **or a model face**), `edit_sketch`, `close_sketch`,
-`list_sketches`, `list_sketch_segments`, `get_sketch_status`.
+`create_sketch` (on a plane **or a model face**), `create_3d_sketch`, `edit_sketch`, `close_sketch`,
+`list_sketches`, `list_sketch_segments`, `list_sketch_points`, `get_sketch_status`.
+
+`create_3d_sketch` 在零件或装配体中创建原生 3D 草图；`draw_line` 支持 `z1_mm/z2_mm`，
+`draw_point` 和 `draw_spline` 支持 `z_mm`。3D 坐标以模型坐标为准，单位为 mm；
+2D 草图拒绝非零 Z，避免原生接口忽略坐标。编辑与关闭根据原生 `Is3D` 选用对应接口，
+编辑时核验持久引用；读取较早草图时不误报为最新草图名称。
+`list_sketch_points` 包含内部点与用户点，返回选择索引、类型和草图/模型坐标。
+其他 3D 曲线、工作平面、完整约束/尺寸与更多建模组合仍有缺口。
 
 Geometry: `draw_line`, `draw_centerline`, `draw_circle`, `draw_rectangle`,
 `draw_arc`, `draw_3point_arc`, `draw_ellipse`, `draw_polygon`, `draw_slot`,

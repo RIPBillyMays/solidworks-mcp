@@ -9,6 +9,7 @@ from .sw_core import (
     as_list, clear_selection, exit_active_sketch, feature_manager, find_feature,
     flag_methods, get_bodies, nothing, require_part, require_selection,
     result, safe, tool, value, SELECTION_SCHEMA, rebuild, whats_wrong, _surface_details,
+    persistent_reference_id as _reference_id,
 )
 from .sw_feature import _feature_names, _feature_created_after
 from .sw_multibody import _finish
@@ -80,12 +81,6 @@ def _geometry(doc):
     return {"solid_body_count": len(bodies),
             "solid_volume_mm3": sum(float(flag_methods(b, "GetMassProperties").GetMassProperties(1.)[3]) * 1e9 for b in bodies),
             "solid_face_count": sum(len(as_list(value(b, "GetFaces"))) for b in bodies)}
-
-
-def _reference_id(doc, obj):
-    raw = flag_methods(value(doc, "Extension"), "GetPersistReference3").GetPersistReference3(obj)
-    # pywin32 can return a memoryview; freeze the native buffer before rollback/rebuild.
-    return bytes(raw) if raw is not None else b""
 
 
 def _target_details(face):

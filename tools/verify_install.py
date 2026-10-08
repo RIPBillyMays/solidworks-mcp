@@ -63,6 +63,7 @@ async def protocol(install, expected, catalog, scratch):
             title = None
             wrap_title = None
             dome_title = None
+            sketch3d_title = None
             try:
                 if scratch:
                     title = (await call("create_new_document", {"kind": "part"}))["document"]["title"]
@@ -274,7 +275,41 @@ async def protocol(install, expected, catalog, scratch):
                     rejected = await rejected_call("set_dome_parameters", {"name": "InstalledDome", "clear_constraint": True, "height_mm": 5})
                     if rejected["parameters_confirmed"] or not rejected["dome"]["has_constraint"] or rejected["dome"]["constraint_reference_confirmed"]:
                         raise RuntimeError("Installed MCP ignored-constraint-clear readback differs.")
+                if scratch:
+                    sketch3d_title = (await call("create_new_document", {"kind": "part"}))["document"]["title"]
+                    await call("create_3d_sketch", {"name": "InstalledSpatial"})
+                    await call("draw_line", {"x1_mm": 0, "y1_mm": 0, "x2_mm": 10, "y2_mm": 20, "z2_mm": 30})
+                    point = await call("draw_point", {"x_mm": 5, "y_mm": -4, "z_mm": 7})
+                    if math.dist(point["point_mm"], [5, -4, 7]) > .001:
+                        raise RuntimeError("Installed MCP XYZ point differs.")
+                    await call("draw_spline", {"points": [{"x_mm": 20, "y_mm": 0, "z_mm": 0},
+                                                           {"x_mm": 25, "y_mm": 5, "z_mm": 8}, {"x_mm": 30, "y_mm": 0, "z_mm": 15}]})
+                    segments = (await call("list_sketch_segments"))["segments"]
+                    line = next(s for s in segments if s["type"] == "line")
+                    if math.dist(line["end_mm"], [10, 20, 30]) > .001 or abs(line["length_mm"] - math.sqrt(1400)) > .001:
+                        raise RuntimeError("Installed MCP XYZ line geometry differs.")
+                    points = await call("list_sketch_points")
+                    if not points["is_3d"] or points["sketch"] != "InstalledSpatial" or len(points["points"]) != 6:
+                        raise RuntimeError("Installed MCP 3D sketch point enumeration differs.")
+                    if not (await call("close_sketch"))["is_3d"]:
+                        raise RuntimeError("Installed MCP closed the wrong sketch mode.")
+                    await call("create_sketch", {"plane": "front", "name": "InstalledPlanar"})
+                    await call("draw_point", {"x_mm": 1, "y_mm": 2})
+                    await call("close_sketch")
+                    reopened = await call("edit_sketch", {"sketch_name": "InstalledSpatial"})
+                    if not reopened["is_3d"] or not reopened["reference_confirmed"] or (await call("list_sketch_points"))["sketch"] != "InstalledSpatial":
+                        raise RuntimeError("Installed MCP reopened-sketch identity or name differs.")
+                    await rejected_call("create_3d_sketch", {"name": "Unexpected"})
+                    await call("close_sketch")
+                    await call("create_3d_sketch", {"name": "InstalledTubePath"})
+                    await call("draw_line", {"x1_mm": 0, "y1_mm": 0, "x2_mm": 10, "y2_mm": 20, "z2_mm": 30})
+                    await call("surface_sweep", {"path_sketch": "InstalledTubePath", "circular_diameter_mm": 2})
+                    area = sum(b["area_mm2"] for b in (await call("list_surface_bodies"))["surface_bodies"])
+                    if abs(area - 2 * math.pi * math.sqrt(1400)) > .01 or (await call("list_sketches"))["sketch_open"]:
+                        raise RuntimeError("Installed MCP 3D path sweep geometry or automatic sketch exit differs.")
             finally:
+                if sketch3d_title:
+                    await call("close_document", {"name": sketch3d_title, "discard_changes": True})
                 if dome_title:
                     await call("close_document", {"name": dome_title, "discard_changes": True})
                 if wrap_title:
