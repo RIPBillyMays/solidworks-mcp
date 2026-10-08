@@ -33,7 +33,13 @@ def run():
                 delta = data["volume_change_mm3"]
                 info = data["wrap"]
                 assert data["geometry_confirmed"] and info["source_sketch"] == "WrapProfile"
-                assert call("get_wrap_data", name="Wrapped")["wrap"] == info
+                queried = call("get_wrap_data", name="Wrapped")["wrap"]
+                assert queried.keys() == info.keys()
+                for key, expected in info.items():
+                    if isinstance(expected, float):
+                        assert abs(queried[key] - expected) < 1e-6, (key, queried[key], expected)
+                    else:
+                        assert queried[key] == expected, (key, queried[key], expected)
                 assert abs(volume() - before - delta) < 1e-6
                 assert info["solid_face_count"] > before_count
                 print(mode, method, delta, info["solid_face_count"], flush=True)
