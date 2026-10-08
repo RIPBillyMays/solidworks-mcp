@@ -54,6 +54,7 @@ async def protocol(install, expected, catalog, scratch):
             original = initial["active_title"]
             title = None
             wrap_title = None
+            dome_title = None
             try:
                 if scratch:
                     title = (await call("create_new_document", {"kind": "part"}))["document"]["title"]
@@ -232,7 +233,27 @@ async def protocol(install, expected, catalog, scratch):
                     multi = await call("wrap_sketch", {"sketch_name": "MultiProfile", "face_indices": indices, "method": "spline", "name": "InstalledMultiWrap"})
                     if len(indices) != 2 or not math.isclose(multi["volume_change_mm3"], 168, abs_tol=.1):
                         raise RuntimeError("Installed MCP multiple-face wrap geometry differs.")
+                if scratch:
+                    dome_title = (await call("create_new_document", {"kind": "part"}))["document"]["title"]
+                    await call("create_sketch", {"plane": "front", "name": "DomeBase"})
+                    await call("draw_circle", {"x_mm": 0, "y_mm": 0, "radius_mm": 10})
+                    await call("close_sketch")
+                    await call("boss_extrude", {"sketch_name": "DomeBase", "depth_mm": 30})
+                    index = next(f["index"] for f in (await call("list_faces"))["faces"] if f.get("normal", [0, 0, 0])[2] > .99)
+                    created = await call("dome", {"face_index": index, "height_mm": 5, "name": "InstalledDome"})
+                    if not math.isclose(created["volume_change_mm3"], math.pi * 5 * 325 / 6, abs_tol=.001):
+                        raise RuntimeError("Installed MCP dome spherical volume differs.")
+                    queried = (await call("get_dome_data", {"name": "InstalledDome"}))["dome"]
+                    if queried["height_mm"] != 5 or queried["reverse_direction"]:
+                        raise RuntimeError("Installed MCP dome definition differs.")
+                    await call("set_dome_parameters", {"name": "InstalledDome", "height_mm": 8})
+                    await call("set_dome_parameters", {"name": "InstalledDome", "elliptical": True})
+                    edited = await call("set_dome_parameters", {"name": "InstalledDome", "reverse_direction": True})
+                    if not edited["dome"]["ellipsoid_check"]["confirmed"] or not math.isclose(edited["volume_change_from_input_mm3"], -2 * math.pi * 100 * 8 / 3, abs_tol=.2):
+                        raise RuntimeError("Installed MCP dome ellipsoid geometry differs.")
             finally:
+                if dome_title:
+                    await call("close_document", {"name": dome_title, "discard_changes": True})
                 if wrap_title:
                     await call("close_document", {"name": wrap_title, "discard_changes": True})
                 if title:
