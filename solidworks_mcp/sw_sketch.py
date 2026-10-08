@@ -303,6 +303,15 @@ def _check_z(doc, points):
         raise RuntimeError("Nonzero Z requires an open 3D sketch; 2D sketch coordinates lie in its XY plane.")
 
 
+def _create_without_inference(manager, method, *coords):
+    previous = manager.AddToDB
+    try:
+        manager.AddToDB = True
+        return getattr(manager, method)(*coords)
+    finally:
+        manager.AddToDB = previous
+
+
 @tool(
     "draw_line",
     "Add a line to the open 2D/3D sketch. Coordinates are mm in sketch space (model space for 3D). Nonzero z1_mm/z2_mm requires a 3D sketch.",
@@ -319,12 +328,22 @@ def draw_line(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
     _check_z(doc, [a, b])
     before = _segment_count(doc)
-    segment = manager.CreateLine(
-        *a, *b,
-    )
+    segment = _create_without_inference(manager, "CreateLine", *a, *b)
     if segment is not None and bool(args.get("construction", False)):
         segment.ConstructionGeometry = True
-    return _drawn(doc, before, "a line")
+    payload = _drawn(doc, before, "a line")
+    if payload["ok"]:
+        if segment is None:
+            return result(False, "Line geometry appeared, but its native reference could not be confirmed.")
+        endpoints = [[float(value(value(segment, method), k)) for k in ("X", "Y", "Z")]
+                     for method in ("GetStartPoint2", "GetEndPoint2")]
+        confirmed = min(max(math.dist(endpoints[0], a), math.dist(endpoints[1], b)),
+                        max(math.dist(endpoints[0], b), math.dist(endpoints[1], a))) <= 1e-5
+        payload.update(ok=confirmed)
+        payload["data"].update(start_mm=[c * 1000 for c in endpoints[0]], end_mm=[c * 1000 for c in endpoints[1]])
+        if not confirmed:
+            payload["message"] = "Line created, but requested endpoints could not be confirmed."
+    return payload
 
 
 @tool(
@@ -359,15 +378,8 @@ def draw_centerline(args: dict[str, Any]) -> dict[str, Any]:
 def draw_circle(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
     before = _segment_count(doc)
-    previous = manager.AddToDB
-    try:
-        # Native documentation recommends bypassing UI inference for this API.
-        manager.AddToDB = True
-        segment = manager.CreateCircleByRadius(
-            to_m(args["x_mm"]), to_m(args["y_mm"]), 0.0, to_m(args["radius_mm"]),
-        )
-    finally:
-        manager.AddToDB = previous
+    segment = _create_without_inference(manager, "CreateCircleByRadius",
+        to_m(args["x_mm"]), to_m(args["y_mm"]), 0.0, to_m(args["radius_mm"]))
     if segment is not None and bool(args.get("construction", False)):
         segment.ConstructionGeometry = True
     payload = _drawn(doc, before, "a circle")

@@ -95,9 +95,9 @@ class Sketch3DContracts(unittest.TestCase):
         for method in (manager.CreateLine, manager.CreatePoint, manager.CreateSpline): method.assert_not_called()
 
     def test_line_preserves_xyz_and_converts_mm_to_native_metres(self):
-        create = Mock(return_value=SimpleNamespace())
+        create = Mock(return_value=SimpleNamespace(GetStartPoint2=lambda: SimpleNamespace(X=.001, Y=.002, Z=.003), GetEndPoint2=lambda: SimpleNamespace(X=.004, Y=.005, Z=.006)))
         doc = SimpleNamespace(SketchManager=SimpleNamespace(ActiveSketch=SimpleNamespace(Is3D=lambda: True)))
-        with patch.object(sketch, "_require_open_sketch", return_value=(doc, SimpleNamespace(CreateLine=create))), patch.object(sketch, "_segment_count", return_value=0), patch.object(sketch, "_drawn", return_value={"ok": True}):
+        with patch.object(sketch, "_require_open_sketch", return_value=(doc, SimpleNamespace(AddToDB=False, CreateLine=create))), patch.object(sketch, "_segment_count", return_value=0), patch.object(sketch, "_drawn", return_value={"ok": True, "data": {}}):
             sketch.draw_line({"x1_mm": 1, "y1_mm": 2, "z1_mm": 3, "x2_mm": 4, "y2_mm": 5, "z2_mm": 6})
         create.assert_called_once_with(.001, .002, .003, .004, .005, .006)
 
@@ -136,6 +136,22 @@ class Sketch3DContracts(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "native rejection"):
                 sketch.draw_circle({"x_mm": 93, "y_mm": 95, "radius_mm": 1})
         self.assertFalse(manager.AddToDB)
+
+    def test_line_wrong_endpoint_is_not_success(self):
+        segment = SimpleNamespace(GetStartPoint2=lambda: SimpleNamespace(X=0, Y=0, Z=0), GetEndPoint2=lambda: SimpleNamespace(X=.009, Y=.020, Z=.030))
+        manager = SimpleNamespace(AddToDB=False, CreateLine=lambda *a: segment)
+        doc = SimpleNamespace(SketchManager=SimpleNamespace(ActiveSketch=SimpleNamespace(Is3D=lambda: True)))
+        with patch.object(sketch, "_require_open_sketch", return_value=(doc, manager)), patch.object(sketch, "_segment_count", side_effect=[0, 1]):
+            self.assertFalse(sketch.draw_line({"x1_mm": 0, "y1_mm": 0, "x2_mm": 10, "y2_mm": 20, "z2_mm": 30})["ok"])
+        self.assertFalse(manager.AddToDB)
+
+    def test_line_restores_inference_after_native_exception(self):
+        manager = SimpleNamespace(AddToDB=True, CreateLine=Mock(side_effect=RuntimeError("native rejection")))
+        doc = SimpleNamespace(SketchManager=SimpleNamespace(ActiveSketch=SimpleNamespace(Is3D=lambda: True)))
+        with patch.object(sketch, "_require_open_sketch", return_value=(doc, manager)), patch.object(sketch, "_segment_count", return_value=0):
+            with self.assertRaisesRegex(RuntimeError, "native rejection"):
+                sketch.draw_line({"x1_mm": 0, "y1_mm": 0, "x2_mm": 10, "y2_mm": 20, "z2_mm": 30})
+        self.assertTrue(manager.AddToDB)
 
     def test_circle_wrong_radius_is_not_success(self):
         segment = SimpleNamespace(GetCenterPoint2=lambda: SimpleNamespace(X=.093, Y=.095, Z=0), GetRadius=lambda: .002)
