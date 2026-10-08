@@ -43,6 +43,14 @@ async def protocol(install, expected, catalog, scratch):
                 if not payload["ok"]:
                     raise RuntimeError(f"Installed MCP call failed: {name}: {payload}")
                 return payload.get("data", {})
+            async def rejected_call(name, arguments):
+                output = await session.call_tool(name, arguments)
+                if output.isError:
+                    raise RuntimeError(f"Expected a structured native failure, got a protocol error: {name}.")
+                payload = json.loads(output.content[0].text)
+                if payload["ok"]:
+                    raise RuntimeError(f"Installed MCP falsely accepted an ignored native edit: {name}.")
+                return payload.get("data", {})
             connections = await call("list_solidworks_sessions")
             attached = connections["attached_process_id"]
             if attached is None:
@@ -239,6 +247,11 @@ async def protocol(install, expected, catalog, scratch):
                     await call("draw_circle", {"x_mm": 0, "y_mm": 0, "radius_mm": 10})
                     await call("close_sketch")
                     await call("boss_extrude", {"sketch_name": "DomeBase", "depth_mm": 30})
+                    await call("create_plane", {"mode": "offset", "selection": {"planes": ["front"]}, "distance_mm": 35, "name": "InstalledApexPlane"})
+                    await call("create_sketch", {"plane_name": "InstalledApexPlane", "name": "InstalledApex"})
+                    await call("draw_point", {"x_mm": 3, "y_mm": 0})
+                    await call("draw_point", {"x_mm": -3, "y_mm": 0})
+                    await call("close_sketch")
                     index = next(f["index"] for f in (await call("list_faces"))["faces"] if f.get("normal", [0, 0, 0])[2] > .99)
                     created = await call("dome", {"face_index": index, "height_mm": 5, "name": "InstalledDome"})
                     if not math.isclose(created["volume_change_mm3"], math.pi * 5 * 325 / 6, abs_tol=.001):
@@ -251,6 +264,16 @@ async def protocol(install, expected, catalog, scratch):
                     edited = await call("set_dome_parameters", {"name": "InstalledDome", "reverse_direction": True})
                     if not edited["dome"]["ellipsoid_check"]["confirmed"] or not math.isclose(edited["volume_change_from_input_mm3"], -2 * math.pi * 100 * 8 / 3, abs_tol=.2):
                         raise RuntimeError("Installed MCP dome ellipsoid geometry differs.")
+                    await call("set_dome_parameters", {"name": "InstalledDome", "height_mm": 5, "reverse_direction": False, "elliptical": False})
+                    constrained = await call("set_dome_parameters", {"name": "InstalledDome", "constraint_sketch_name": "InstalledApex"})
+                    check = constrained["dome"]["constraint_check"]
+                    if not constrained["dome"]["constraint_reference_confirmed"] or not check["confirmed"] or check["sample_count"] != 2:
+                        raise RuntimeError("Installed MCP whole point-sketch constraint differs.")
+                    if sorted(round(p[0]) for p in check["samples_mm"]) != [-3, 3] or any(abs(p[2] - 35) > .001 for p in check["samples_mm"]):
+                        raise RuntimeError("Installed MCP constraint model coordinates differ.")
+                    rejected = await rejected_call("set_dome_parameters", {"name": "InstalledDome", "clear_constraint": True, "height_mm": 5})
+                    if rejected["parameters_confirmed"] or not rejected["dome"]["has_constraint"] or rejected["dome"]["constraint_reference_confirmed"]:
+                        raise RuntimeError("Installed MCP ignored-constraint-clear readback differs.")
             finally:
                 if dome_title:
                     await call("close_document", {"name": dome_title, "discard_changes": True})

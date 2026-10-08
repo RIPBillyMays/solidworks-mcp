@@ -199,7 +199,7 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 | `preview_surface_trim` / `trim_surface` / `get_surface_trim_data` | 标准与相互曲面修剪；预览区域面积、边界与选择点，按区域索引保留或删除，并读取原生特征数据。 |
 | `boundary_surface` / `get_boundary_feature_data` | 单/双方向有序曲线的边界曲面、按方向修剪、原生形成实体选项及只读检查；相切/曲率控制按边界采样核验几何，未确认时保留特征并返回失败。 |
 | `wrap_sketch` / `get_wrap_data` / `set_wrap_parameters` | 单/多实体面的包覆三模式、解析/样条方法、三类方向及厚度/模式/方向/源草图修改；读回原生 `Face` 字段的前置几何。以体积、面分割、原生定义和持久引用快照验证。方法/网格不可读回；反向、清除方向及目标面修改未确认时返回失败。 |
-| `dome` / `get_dome_data` / `set_dome_parameters` | 原生圆顶创建、定义与几何读取、高度/凹凸/椭球模式修改、目标面替换、草图点约束和方向边。以实际体积、中心高度、24 点椭球表面采样及持久引用核验；复杂面、方向导致零效果或无法确认椭球形状时返回失败并保留特征。 |
+| `dome` / `get_dome_data` / `set_dome_parameters` | 原生圆顶创建、定义与几何读取、高度/凹凸/椭球模式修改、目标面替换、单点/整体点草图约束和方向边。每个显式草图点转换到模型坐标，检查实际曲面距离；纯曲线草图不作为隐含点约束。清除约束/方向核验引用是否实际消失，本机请求被忽略时返回失败并保留特征。另以体积、中心高度、24 点椭球采样及持久引用核验。 |
 | `surface_sweep` | 开口/闭合草图或圆截面扫描；导引线、法向控制、扭转、第一/第二/双向扫描，读回原生参数。要求 SW 2018+。 |
 | `delete_surface_holes` | 删除选定曲面孔边界，保留未选孔；支持单孔与多孔。 |
 | `surface_extrude` / `planar_surface` | 从草图生成拉伸曲面或平面曲面。 |
