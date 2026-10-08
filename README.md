@@ -6,7 +6,7 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-169 tools: sketching with real relations and driving dimensions, the solid
+171 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
 the model can see what it just built.
@@ -197,6 +197,7 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 | `delete_bodies` | 创建删除/保留实体特征。 |
 | `mid_surface` / `get_mid_surface_data` | 原生自动中面与只读检查；读取面配对、厚度、面积、位置和缝合结果。非零位置未生效时返回失败。 |
 | `preview_surface_trim` / `trim_surface` / `get_surface_trim_data` | 标准与相互曲面修剪；预览区域面积、边界与选择点，按区域索引保留或删除，并读取原生特征数据。 |
+| `boundary_surface` / `get_boundary_feature_data` | 单/双方向有序曲线的边界曲面、按方向修剪、原生形成实体选项及只读检查；相切/曲率控制按边界采样核验几何，未确认时保留特征并返回失败。 |
 | `surface_sweep` | 开口/闭合草图或圆截面扫描；导引线、法向控制、扭转、第一/第二/双向扫描，读回原生参数。要求 SW 2018+。 |
 | `delete_surface_holes` | 删除选定曲面孔边界，保留未选孔；支持单孔与多孔。 |
 | `surface_extrude` / `planar_surface` | 从草图生成拉伸曲面或平面曲面。 |
@@ -214,6 +215,13 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 复杂区域可用 `picked_points_mm` 指定实际落在区域上的选择点。
 相互修剪在本机即使 `knit=false` 仍会合并相接曲面；工具返回失败并保留特征信息。
 实体形成选项、更多复杂曲面组合和旧版软件尚待覆盖或实测。
+
+边界曲面的 `direction1`、`direction2` 是有序曲线列表，每项包含一个 `selection`。
+曲线需先全部选择，再设置条件；创建后读取实际曲线数量、影响范围、相切类型和实体类型。
+`create_solid=true` 使用原生 `InsertNetBlend2` 的形成实体选项，旧接口不支持该选项。
+相切/曲率连续性检查使用输入面边界的几何采样和输出曲面的法向、第二基本形式，
+参数读回正确而几何不符时仍返回失败。本机圆端面案例的法向差为 90°，该细项尚未完成。
+方向向量、中心线、控制柄编辑和更多复杂边界条件仍待覆盖。
 
 ### 钣金与焊件
 

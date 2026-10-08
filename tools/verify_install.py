@@ -172,6 +172,19 @@ async def protocol(install, expected, catalog, scratch):
                         raise RuntimeError("Installed MCP trim retained the wrong sheet area.")
                     if (await call("get_surface_trim_data", {"name": "InstalledTrim"}))["trim"] != trimmed["trim"]:
                         raise RuntimeError("Installed MCP trim definition readback differs.")
+                    for name, coords in (("BoundaryBottom", [500, 500, 510, 500]), ("BoundaryTop", [500, 510, 510, 510]),
+                                         ("BoundaryLeft", [500, 500, 500, 510]), ("BoundaryRight", [510, 500, 510, 510])):
+                        await call("create_sketch", {"plane": "front", "name": name})
+                        await call("draw_line", dict(zip(("x1_mm", "y1_mm", "x2_mm", "y2_mm"), coords)))
+                        await call("close_sketch")
+                    boundary = (await call("boundary_surface", {
+                        "direction1": [{"selection": {"sketches": [n]}} for n in ("BoundaryBottom", "BoundaryTop")],
+                        "direction2": [{"selection": {"sketches": [n]}} for n in ("BoundaryLeft", "BoundaryRight")],
+                        "name": "InstalledBoundary"}))["boundary"]
+                    if not math.isclose(boundary["feature_face_area_mm2"], 100, abs_tol=1e-7) or [d["curve_count"] for d in boundary["directions"]] != [2, 2]:
+                        raise RuntimeError("Installed MCP boundary area or curve groups differ.")
+                    if (await call("get_boundary_feature_data", {"name": "InstalledBoundary"}))["boundary"] != boundary:
+                        raise RuntimeError("Installed MCP boundary definition query differs.")
                 await call("list_reference_points")
                 systems = await call("list_coordinate_systems")
                 if scratch and systems["coordinate_systems"][0]["origin_mm"] != [2, 3, 4]:
