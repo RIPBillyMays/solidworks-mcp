@@ -8,7 +8,7 @@
 |---|---|---|---|
 | 0 | Feasibility research | ✅ done 2026-10-08 | — |
 | 1 | Fork, install, offline baseline | ✅ done 2026-10-08 | 🧪 T1 ✅ · 🧑 G1 ✅ (2026-10-08) |
-| 5a | Client registration pulled forward (Claude Code, Claude Desktop, Codex CLI) | 🔄 2026-10-08 | 🧪 T5a: client → server → `solidworks_status` round trip |
+| 5a | Client registration pulled forward (Claude Code, Claude Desktop, Codex CLI); see `docs/clients.md` | ✅ registered 2026-10-08 | 🧪 T5a: Codex ✅ · Claude Code ⏸ (CLI login expired) · Claude Desktop ⏸ (restart needed) |
 | 2 | Static 2017 compatibility gate | ⏳ **next** | 🧪 T2 |
 | 3 | Live smoke test on SW 2017 | ⏳ | 🧑 G2 (readiness) · 🧪 T3 · 🧑 G3 (go/no-go) |
 | 4 | Fix or fence failing tools | ⏳ | 🧪 T4 · 🧑 G4 |
