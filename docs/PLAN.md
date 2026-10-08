@@ -179,7 +179,8 @@ After every real modeling session:
 - **Assembly strategy:** **the AI proposes per project** in its build plan and Zach approves → rule R-002.
 - **AI clients:** **Claude** (Code + Desktop) and **Codex CLI**. Registration pulled forward as Phase 5a. The guided session (5.4) and full T5 stay after Phase 4.
 - **Plan / ADRs:** plan accepted. ADR-0004 stays Proposed until G6.
-- **Not yet answered:** whether the fork account `RIPBillyMays` is right, and real-file access after testing. Until answered, the default is **sandbox-only** (R-007).
+- **Fork account:** `RIPBillyMays` is correct. Pushing to `origin` is approved.
+- **Real-file access:** **sandbox-only** (R-007) until Zach says otherwise. The AI never opens or saves files outside `sandbox/`.
 
 ## ⚠️ Using the clients before Phases 2–4
 The server is registered, but until Phase 2–4 fixes land, expect:
