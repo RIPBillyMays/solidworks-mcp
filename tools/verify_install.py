@@ -208,6 +208,20 @@ async def protocol(install, expected, catalog, scratch):
                         raise RuntimeError("Installed MCP wrap volume differs.")
                     if (await call("get_wrap_data", {"name": "InstalledWrap"}))["wrap"] != wrapped["wrap"]:
                         raise RuntimeError("Installed MCP wrap definition differs.")
+                    edited = await call("set_wrap_parameters", {"name": "InstalledWrap", "thickness_mm": 2})
+                    if not math.isclose(edited["volume_change_from_input_mm3"], 88, abs_tol=1e-6) or edited["wrap"]["thickness_mm"] != 2:
+                        raise RuntimeError("Installed MCP wrap thickness edit differs.")
+                    directed = await call("set_wrap_parameters", {"name": "InstalledWrap", "pull_selection": {"planes": ["right"]}})
+                    if not directed["wrap"]["pull_reference_confirmed"] or not math.isclose(directed["volume_change_from_input_mm3"], 79.9100175565, abs_tol=.001):
+                        raise RuntimeError("Installed MCP wrap pull identity or geometry differs.")
+                    await call("set_wrap_parameters", {"name": "InstalledWrap", "mode": "scribe"})
+                    await call("create_sketch", {"plane_name": "WrapPlane", "name": "MultiProfile"})
+                    await call("draw_rectangle", {"x1_mm": -25, "y1_mm": -4, "x2_mm": -5, "y2_mm": 4})
+                    await call("close_sketch")
+                    indices = [f["index"] for f in (await call("list_faces"))["faces"] if f["surface_type"] == "cylinder"]
+                    multi = await call("wrap_sketch", {"sketch_name": "MultiProfile", "face_indices": indices, "method": "spline", "name": "InstalledMultiWrap"})
+                    if len(indices) != 2 or not math.isclose(multi["volume_change_mm3"], 168, abs_tol=.1):
+                        raise RuntimeError("Installed MCP multiple-face wrap geometry differs.")
             finally:
                 if wrap_title:
                     await call("close_document", {"name": wrap_title, "discard_changes": True})
