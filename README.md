@@ -153,6 +153,9 @@ parallel-through-point), `create_axis`.
 2D 草图拒绝非零 Z，避免原生接口忽略坐标。编辑与关闭根据原生 `Is3D` 选用对应接口，
 编辑时核验持久引用；读取较早草图时不误报为最新草图名称。
 `list_sketch_points` 包含内部点与用户点，返回选择索引、类型和草图/模型坐标。
+`draw_centerline` 支持 XYZ 构造线，并核验端点与构造属性；`draw_3point_arc` 支持
+三点 XYZ 圆弧，核验半径、弧长、端点和点到曲线距离，共线/重合输入在创建前拒绝。
+重叠/共端点圆弧原生结果曾偏离输入，返回未确认状态。3D 椭圆原生对象未得到有效曲线，
 其他 3D 曲线、工作平面、完整约束/尺寸与更多建模组合仍有缺口。
 
 Geometry: `draw_line`, `draw_centerline`, `draw_circle`, `draw_rectangle`,

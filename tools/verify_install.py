@@ -307,6 +307,18 @@ async def protocol(install, expected, catalog, scratch):
                     area = sum(b["area_mm2"] for b in (await call("list_surface_bodies"))["surface_bodies"])
                     if abs(area - 2 * math.pi * math.sqrt(1400)) > .01 or (await call("list_sketches"))["sketch_open"]:
                         raise RuntimeError("Installed MCP 3D path sweep geometry or automatic sketch exit differs.")
+                    await call("create_3d_sketch", {"name": "InstalledSpatialArcs"})
+                    await call("draw_centerline", {"x1_mm": 80, "y1_mm": 0, "x2_mm": 90, "y2_mm": 20, "z2_mm": 30})
+                    construction = (await call("list_sketch_segments"))["segments"][0]
+                    if not construction["construction"] or math.dist(construction["end_mm"], [90,20,30]) > .001:
+                        raise RuntimeError("Installed MCP spatial construction line differs.")
+                    for start, end, middle, angle in (([100,0,0],[100,10,0],[100,5,5],math.pi),
+                                                      ([120,0,0],[120,5,5],[120,-5,5],1.5*math.pi)):
+                        coordinates = {f"{k}{i}_mm": v for i,p in enumerate((start,end,middle),1) for k,v in zip("xyz",p)}
+                        arc = await call("draw_3point_arc", coordinates)
+                        if abs(arc["radius_mm"]-5) > .01 or abs(arc["length_mm"]-5*angle) > .01 or arc["max_point_gap_mm"] > .01:
+                            raise RuntimeError("Installed MCP spatial arc geometry differs.")
+                    await call("close_sketch")
             finally:
                 if sketch3d_title:
                     await call("close_document", {"name": sketch3d_title, "discard_changes": True})

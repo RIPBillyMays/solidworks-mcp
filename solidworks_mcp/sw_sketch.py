@@ -339,30 +339,27 @@ def draw_line(args: dict[str, Any]) -> dict[str, Any]:
                      for method in ("GetStartPoint2", "GetEndPoint2")]
         confirmed = min(max(math.dist(endpoints[0], a), math.dist(endpoints[1], b)),
                         max(math.dist(endpoints[0], b), math.dist(endpoints[1], a))) <= 1e-5
+        if args.get("construction", False):
+            confirmed = confirmed and bool(value(segment, "ConstructionGeometry"))
         payload.update(ok=confirmed)
         payload["data"].update(start_mm=[c * 1000 for c in endpoints[0]], end_mm=[c * 1000 for c in endpoints[1]])
         if not confirmed:
-            payload["message"] = "Line created, but requested endpoints could not be confirmed."
+            payload["message"] = "Line created, but requested endpoints or construction state could not be confirmed."
     return payload
 
 
 @tool(
     "draw_centerline",
-    "Add a construction centerline to the open sketch, for revolve axes and symmetry. Millimetres.",
+    "Add a verified construction line to the open 2D/3D sketch. XYZ coordinates are millimetres; nonzero Z requires 3D. Uses native CreateLine because CreateCenterLine may flatten Z.",
     {
         "x1_mm": {"type": "number"}, "y1_mm": {"type": "number"},
         "x2_mm": {"type": "number"}, "y2_mm": {"type": "number"},
+        "z1_mm": {"type": "number", "default": 0}, "z2_mm": {"type": "number", "default": 0},
     },
     ["x1_mm", "y1_mm", "x2_mm", "y2_mm"],
 )
 def draw_centerline(args: dict[str, Any]) -> dict[str, Any]:
-    doc, manager = _require_open_sketch()
-    before = _segment_count(doc)
-    manager.CreateCenterLine(
-        to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-        to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
-    )
-    return _drawn(doc, before, "a centerline")
+    return draw_line({**args, "construction": True})
 
 
 @tool(
@@ -442,23 +439,55 @@ def draw_arc(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "draw_3point_arc",
-    "Add an arc through three points: start, end, and a point on the arc. Millimetres.",
+    "Add a verified 2D/3D arc through start, end and a point on the arc, in mm. Nonzero Z requires 3D. Rejects coincident or collinear input before creation and checks native endpoints, radius, length and curve distance.",
     {
         "x1_mm": {"type": "number"}, "y1_mm": {"type": "number"},
         "x2_mm": {"type": "number"}, "y2_mm": {"type": "number"},
         "x3_mm": {"type": "number"}, "y3_mm": {"type": "number"},
+        "z1_mm": {"type": "number", "default": 0}, "z2_mm": {"type": "number", "default": 0}, "z3_mm": {"type": "number", "default": 0},
     },
     ["x1_mm", "y1_mm", "x2_mm", "y2_mm", "x3_mm", "y3_mm"],
 )
 def draw_3point_arc(args: dict[str, Any]) -> dict[str, Any]:
+    points = [_xyz(args, f"x{i}_mm", f"y{i}_mm", f"z{i}_mm") for i in (1, 2, 3)]
+    a, b, c = points
+    u, v = [[q - p for p, q in zip(a, point)] for point in (b, c)]
+    def cross(x, y):
+        return [x[1]*y[2]-x[2]*y[1], x[2]*y[0]-x[0]*y[2], x[0]*y[1]-x[1]*y[0]]
+    def dot(x, y):
+        return sum(p*q for p, q in zip(x, y))
+    w = cross(u, v)
+    area_squared = dot(w, w)
+    if min(math.dist(a, b), math.dist(a, c), math.dist(b, c)) <= 1e-9 or area_squared <= dot(u,u)*dot(v,v)*1e-16:
+        raise RuntimeError("Three-point arcs require distinct, non-collinear points.")
+    center = [a[i] + (dot(u,u)*cross(v,w)[i] + dot(v,v)*cross(w,u)[i])/(2*area_squared) for i in range(3)]
+    radial = [[p[i]-center[i] for i in range(3)] for p in points]
+    radius = math.sqrt(dot(radial[0], radial[0]))
+    normal = [x/math.sqrt(area_squared) for x in w]
+    def angle(target):
+        return math.atan2(dot(normal, cross(radial[0], target)), dot(radial[0], target)) % (2*math.pi)
+    end_angle, through_angle = angle(radial[1]), angle(radial[2])
+    expected_length = radius*(end_angle if through_angle <= end_angle else 2*math.pi-end_angle)
     doc, manager = _require_open_sketch()
+    _check_z(doc, points)
     before = _segment_count(doc)
-    manager.Create3PointArc(
-        to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-        to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
-        to_m(args["x3_mm"]), to_m(args["y3_mm"]), 0.0,
-    )
-    return _drawn(doc, before, "a 3-point arc")
+    segment = _create_without_inference(manager, "Create3PointArc", *(q for p in points for q in p))
+    payload = _drawn(doc, before, "a 3-point arc")
+    if not payload["ok"]:
+        return payload
+    if segment is None:
+        return result(False, "Arc appeared, but its native reference could not be confirmed.")
+    curve = value(segment, "GetCurve")
+    if curve is None:
+        return result(False, "Arc appeared, but its native curve could not be confirmed.")
+    flag_methods(curve, "GetClosestPointOn")
+    gaps = [math.dist(p, [float(q) for q in as_list(curve.GetClosestPointOn(*p))[:3]]) for p in points]
+    endpoints = [[float(value(value(segment, method), k)) for k in ("X", "Y", "Z")] for method in ("GetStartPoint2", "GetEndPoint2")]
+    endpoint_gap = min(max(math.dist(endpoints[0],a), math.dist(endpoints[1],b)), max(math.dist(endpoints[0],b), math.dist(endpoints[1],a)))
+    actual_radius, actual_length = float(value(segment,"GetRadius")), float(value(segment,"GetLength"))
+    confirmed = max(gaps+[endpoint_gap]) <= 1e-5 and abs(actual_radius-radius) <= 1e-5 and abs(actual_length-expected_length) <= 1e-5
+    return result(confirmed, "Created and verified a 3-point arc." if confirmed else "Arc created, but requested geometry could not be confirmed.",
+                  radius_mm=actual_radius*1000, length_mm=actual_length*1000, max_point_gap_mm=max(gaps+[endpoint_gap])*1000)
 
 
 @tool(
