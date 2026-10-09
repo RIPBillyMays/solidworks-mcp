@@ -8,9 +8,9 @@
 |---|---|---|---|
 | 0 | Feasibility research | ✅ done 2026-10-08 | — |
 | 1 | Fork, install, offline baseline | ✅ done 2026-10-08 | 🧪 T1 ✅ · 🧑 G1 ✅ (2026-10-08) |
-| 5a | Client registration pulled forward (Claude Code, Claude Desktop, Codex CLI); see `docs/clients.md` | ✅ registered 2026-10-08 | 🧪 T5a: Codex ✅ · Claude Code ⏸ (CLI login expired) · Claude Desktop ⏸ (restart needed) |
-| 2 | Static 2017 compatibility gate | ⏳ **next** | 🧪 T2 |
-| 3 | Live smoke test on SW 2017 | ⏳ | 🧑 G2 (readiness) · 🧪 T3 · 🧑 G3 (go/no-go) |
+| 5a | Client registration pulled forward (Claude Code, Claude Desktop, Codex CLI); see `docs/clients.md` | ✅ registered 2026-10-08 | 🧪 T5a: Codex ✅ · Claude Code ✅ · Claude Desktop ✅ (2026-10-08; Codex parked by Zach) |
+| 2 | Static 2017 compatibility gate | ✅ done 2026-10-08 (merged to `main`) | 🧪 T2 ✅ (74 tests; `docs/reports/phase2-verification.md`) |
+| 3 | Live smoke test on SW 2017 | ⏳ **next** | 🧑 G2 (readiness) · 🧪 T3 · 🧑 G3 (go/no-go) |
 | 4 | Fix or fence failing tools | ⏳ | 🧪 T4 · 🧑 G4 |
 | 5 | Connect AI clients + first guided session | ⏳ | 🧪 T5 · 🧑 G5 |
 | 6 | Rulebook v0 ("the brain") | ⏳ | 🧪 T6 · 🧑 G6 |
@@ -75,6 +75,12 @@
 - **2.6 Unverified catalog claims.** The 2.2 enum test must confirm or refute: enum mismatches in revolve mid-plane, section/detail view options, drawing display mode and `DeleteSelection2`, plus possible silent no-ops `ViewDisplayShadedwithedges` and `TangentEdgeDisplay`. Dialog-raising preferences other than #10 (over-defining dimension prompt, STL/3MF export info) are checked live in Phase 3.
 
 **Verifier (separate Sonnet):** re-run all offline tests, and confirm that the upstream diff is limited to 2.3 and that the test fails if a fake `SaveAs3(` call is injected (mutation check).
+
+**Outcome (2026-10-08):**
+- Upstream commits 10c2beb, 4831e37 and d07a29b were cherry-picked from `upstream/codex/continue-sw-compat` (denglobert, verified on SW 2016). They cover the 9-import part of 2.5 and add the `call_versioned` fallbacks.
+- Implementer A did 2.3 and the rest of 2.5. Implementer B did 2.1, 2.2, 2.4 and 2.6. 2.6 confirmed 6 code bugs and refuted 1 claim (`DeleteSelection2(0)`); implementer C fixed all 6 from typelib values. Each fix carries a `# Phase 3: verify live` comment.
+- The verifier passed T2: 74 tests, 0 expectedFailure, an empty allowlist, and all 4 mutations caught.
+- Reports: `docs/reports/phase2-static-compat.md`, `phase2-tlb-probe.md`, `phase2-verification.md`.
 
 🧪 **T2:** all offline tests are green (upstream's 24 plus the new compat tests), there are zero un-allowlisted misses, and the mutation check fails as expected.
 

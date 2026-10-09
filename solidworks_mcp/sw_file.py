@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modified for SOLIDWORKS 2017 support (fork).
 
 """Session status, document lifecycle, saving, exporting, and appearance."""
 
@@ -46,6 +47,15 @@ from .sw_core import (
     value,
     whats_wrong,
 )
+
+
+# User-preference string ids for the default templates (swUserPreferenceStringValue_e).
+# These are 8/9/10 in the 2017 type library; ids 1/2/3 are swFileLocationsDocuments /
+# PaletteFeatures / PaletteParts, which never yield a template and silently forced
+# every new document onto disk-discovered templates.
+SW_DEFAULT_TEMPLATE_PART = 8
+SW_DEFAULT_TEMPLATE_ASSEMBLY = 9
+SW_DEFAULT_TEMPLATE_DRAWING = 10
 
 
 def validated_output_path(path: str, allowed_extensions: set[str], allow_overwrite: bool = False) -> Path:
@@ -136,7 +146,11 @@ def create_new_document(args: dict[str, Any]) -> dict[str, Any]:
 
 def new_document(kind: str) -> dict[str, Any]:
     app = running_app()
-    preference = {"part": 1, "assembly": 2, "drawing": 3}.get(kind)
+    preference = {
+        "part": SW_DEFAULT_TEMPLATE_PART,
+        "assembly": SW_DEFAULT_TEMPLATE_ASSEMBLY,
+        "drawing": SW_DEFAULT_TEMPLATE_DRAWING,
+    }.get(kind)
     if preference is None:
         return result(False, "kind must be part, assembly, or drawing.")
     template = app.GetUserPreferenceStringValue(preference)

@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modified for SOLIDWORKS 2017 support (fork).
 
 """Shared foundation for the solidworks-mcp MCP bridge.
 
@@ -358,9 +359,12 @@ _FEATURE_MANAGER_METHODS = (
 )
 
 _EXTENSION_METHODS = (
-    "SelectByID2", "SelectByRay", "AddDimension", "DeleteSelection2", "SaveAs", "SaveAs3",
+    "SelectByID2", "SelectByRay", "AddDimension", "DeleteSelection2", "SaveAs",
     "GetMassProperties2", "GetWhatsWrong",
 )
+# SaveAs3 is deliberately absent: the 2017 typelib has no
+# IModelDocExtension.SaveAs3 (it exists only on IModelDoc2) and nothing calls it,
+# so listing it here only logged an "unflaggable" warning.
 
 # Grouped by the interface the installed sldworks.tlb declares them on.  The
 # whole list is offered to every document regardless: the type library describes

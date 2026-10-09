@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modified for SOLIDWORKS 2017 support (fork).
 
 """Solid features: extrude, revolve, fillet, chamfer, shell, sweep, loft, rib,
 draft, holes, patterns, and mirror.
@@ -238,7 +239,10 @@ def revolve(args: dict[str, Any]) -> dict[str, Any]:
     angle = to_rad(args.get("angle_deg", 360))
     mid_plane = bool(args.get("mid_plane", False))
     single_direction = not mid_plane
-    direction_type = 4 if mid_plane else 0  # swRevolveType_e: 4 = mid plane
+    # FeatureRevolve2.Dir1Type is swEndConditions_e: 6 = swEndCondMidPlane. (4 would be
+    # swEndCondUpToSurface; 4 is only mid-plane in swRevolveType_e, a different enum.)
+    # Phase 3: verify live that single_direction=False is what mid plane wants.
+    direction_type = 6 if mid_plane else 0
 
     feature = feature_manager(doc).FeatureRevolve2(
         single_direction, True, False, bool(args.get("cut", False)),

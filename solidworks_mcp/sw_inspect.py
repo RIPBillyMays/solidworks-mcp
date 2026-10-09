@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modified for SOLIDWORKS 2017 support (fork).
 
 """Feedback channel: topology listings, screenshots, mass properties, measurement,
 bounding boxes, and rebuild-error readback.
@@ -280,8 +281,11 @@ def measure(args: dict[str, Any]) -> dict[str, Any]:
         measurement.ArcOption = 0  # centre-to-centre for circular entities
     except Exception:
         pass
-    # IMeasure::Calculate takes no arguments in this type library.
-    if not bool(value(measurement, "Calculate")):
+    # IMeasure::Calculate(Entities) takes one argument in the 2017 type library;
+    # a null dispatch means "measure the current selection".  It takes an
+    # argument, so flag it as a method or late binding may evaluate it bare.
+    flag_methods(measurement, "Calculate")
+    if not bool(measurement.Calculate(nothing())):
         clear_selection(doc)
         return result(False, "SOLIDWORKS could not measure that selection.", entities=count)
 
@@ -359,10 +363,12 @@ def set_view(args: dict[str, Any]) -> dict[str, Any]:
     _orient(doc, view)
     if bool(args.get("shaded_with_edges", True)):
         try:
-            # swViewDisplayMode_e: 4 = shaded with edges
-            doc.ViewDisplayShadedwithedges()
+            # 2017 has no ModelDoc2.ViewDisplayShadedwithedges (only ViewDisplayShaded),
+            # so set the mode on the view itself: 5 = swViewDisplayMode_ShadedWithEdges.
+            # Phase 3: verify live that the property set takes effect.
+            doc.ActiveView.DisplayMode = 5
         except Exception:
-            pass
+            logger.info("Could not set shaded-with-edges on the active view.", exc_info=True)
     if bool(args.get("zoom_to_fit", True)):
         try:
             invoke_no_arg(doc, "ViewZoomtofit2")
