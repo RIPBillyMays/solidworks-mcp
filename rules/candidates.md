@@ -60,3 +60,10 @@ Seeded 2026-10-08 from Zach's stated goals and common SOLIDWORKS design-intent p
 - **Applies to:** all
 - **Rule:** Every dimension in plans, tool arguments and reports is in **mm** (angles in degrees) unless Zach specifies other units for the request. State the units in the build plan.
 - **Why:** This is Zach's default unit system *(G1, 2026-10-08)*. The server converts to SOLIDWORKS's internal metres at the boundary.
+
+### R-009: Edge breaks are fillet/chamfer features, not sketch geometry
+- **Enforcement:** soft (status **confirmed** by Zach at 🧑 G4, 2026-10-09; becomes active with the Phase 6 rulebook)
+- **Applies to:** part
+- **Rule:** Round or bevel model edges with the `fillet` and `chamfer` **features**, applied to body edges after the base shape exists. Do not bake rounds or bevels into sketch profiles with `sketch_fillet` or `sketch_chamfer`. Sketch fillets and chamfers are reserved for shapes that really are profile geometry, such as a slot end or a cam profile, and the build plan says why.
+- **Why:** Edge-break features are separate, suppressible and editable in the feature tree. Keeping them out of the sketch keeps the sketch simple and fully defined, and lets Zach change or remove a break without reworking the profile. This is common SOLIDWORKS practice (cosmetic features last).
+- *Source: Zach, 2026-10-09 (G4: "are you using the chamfer feature … and the fillet features on the edges and not making the changes in the sketch profiles?").*

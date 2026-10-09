@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modified for SOLIDWORKS 2017 support (fork).
 
 """A local, stdio-only MCP bridge for a running SOLIDWORKS instance.
 
@@ -59,7 +60,9 @@ from . import sw_inspect  # noqa: F401
 from . import sw_assembly  # noqa: F401
 from . import sw_drawing  # noqa: F401
 from . import sw_demo  # noqa: F401
+from .sw2017_fences import apply_fences
 
+apply_fences(TOOLS, HANDLERS)  # ADR-0006; after every module has registered
 
 server = Server("solidworks-mcp")
 

@@ -254,6 +254,7 @@ VALUE_KEYED = {
 
 # scalar constants: {"module.NAME": (value, "enum.member")}
 SCALARS = {
+    "sw_file._SW_GENERIC_SAVE_ERROR": (sw_file._SW_GENERIC_SAVE_ERROR, "swFileSaveError_e.swGenericSaveError"),
     "sw_core.BODY_SOLID": (sw_core.BODY_SOLID, "swBodyType_e.swSolidBody"),
     "sw_core.BODY_SHEET": (sw_core.BODY_SHEET, "swBodyType_e.swSheetBody"),
     "sw_core.BODY_ALL": (sw_core.BODY_ALL, "swBodyType_e.swAllBodies"),

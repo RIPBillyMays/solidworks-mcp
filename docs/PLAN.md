@@ -11,14 +11,14 @@
 | 5a | Client registration pulled forward (Claude Code, Claude Desktop, Codex CLI); see `docs/clients.md` | ✅ registered 2026-10-08 | 🧪 T5a: Codex ✅ · Claude Code ✅ · Claude Desktop ✅ (2026-10-08; Codex parked by Zach) |
 | 2 | Static 2017 compatibility gate | ✅ done 2026-10-08 (merged to `main`) | 🧪 T2 ✅ (74 tests; `docs/reports/phase2-verification.md`) |
 | 3 | Live smoke test on SW 2017 | ✅ done 2026-10-08 (merged to `main`) | 🧑 G2 ✅ · 🧪 T3 ✅ (`docs/reports/phase3-live-matrix.md`, `phase3-verification.md`) · 🧑 G3 ✅ Go (2026-10-08) |
-| 4 | Fix or fence failing tools | ⏳ **next** (approach approved at G3; see handoff -04) | 🧪 T4 · 🧑 G4 |
-| 5 | Connect AI clients + first guided session | ⏳ | 🧪 T5 · 🧑 G5 |
+| 4 | Fix or fence failing tools | ✅ done 2026-10-09 (merged to `main`; ADR-0006; fenced: `auto_dimension_view`) | 🧪 T4 ✅ (100 PASS, 1 FENCED, 2 UNVERIFIED; 102 unit tests) · 🧑 G4 ✅ (2026-10-09; R-009 confirmed; drawings deferred) |
+| 5 | Connect AI clients + first guided session | ⏳ **next** (3D only) | 🧪 T5 · 🧑 G5 |
 | 6 | Rulebook v0 ("the brain") | ⏳ | 🧪 T6 · 🧑 G6 |
 | 7 | Hardening and upkeep | ⏳ | 🧑 G7 |
 | ∞ | Rules learning loop | ongoing after G5 | per session |
 
 ## Goal and success criteria
-1. Claude (Desktop and Code) plus at least one other MCP client can build a **part, an assembly and a drawing** in SOLIDWORKS 2017 from a natural-language request.
+1. Claude (Desktop and Code) plus at least one other MCP client can build a **part, an assembly and a drawing** *(drawings deferred by Zach at G4, 2026-10-09: focus on 3D modeling only)* in SOLIDWORKS 2017 from a natural-language request.
 2. Every exposed tool is either **verified on 2017** or **fenced** (disabled with a clear reason).
 3. A versioned **rulebook** governs how the AI plans and builds, and the server delivers it to any client (ADR-0004).
 4. Regressions are caught by offline tests (unit tests plus the 2017 API compat check) and a repeatable live suite.
