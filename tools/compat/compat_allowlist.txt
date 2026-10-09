@@ -1,0 +1,7 @@
+# Names the static API-compat test (tests/test_sw2017_api_compat.py) must NOT hold
+# against SOLIDWORKS 2017 because they are not SOLIDWORKS API members.
+# Format: one name per line, "Name  # reason". Use "Interface.Member" to scope an entry.
+# Never put a real SOLIDWORKS member here: a call that 2017 lacks is a bug to fix or to
+# list in KNOWN_2017_MISSES in the test, not something to allowlist.
+# (The scanner already ignores attributes of imported modules such as pythoncom.Nothing
+# and win32com.client.VARIANT, so this list only needs genuine leftovers.)

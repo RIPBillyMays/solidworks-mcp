@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modified for SOLIDWORKS 2017 support (fork).
 
 """Session status, document lifecycle, saving, exporting, and appearance."""
 
@@ -40,11 +41,21 @@ from .sw_core import (
     require_part,
     result,
     running_app,
+    safe,
     discover_template,
     tool,
     value,
     whats_wrong,
 )
+
+
+# User-preference string ids for the default templates (swUserPreferenceStringValue_e).
+# These are 8/9/10 in the 2017 type library; ids 1/2/3 are swFileLocationsDocuments /
+# PaletteFeatures / PaletteParts, which never yield a template and silently forced
+# every new document onto disk-discovered templates.
+SW_DEFAULT_TEMPLATE_PART = 8
+SW_DEFAULT_TEMPLATE_ASSEMBLY = 9
+SW_DEFAULT_TEMPLATE_DRAWING = 10
 
 
 def validated_output_path(path: str, allowed_extensions: set[str], allow_overwrite: bool = False) -> Path:
@@ -135,7 +146,11 @@ def create_new_document(args: dict[str, Any]) -> dict[str, Any]:
 
 def new_document(kind: str) -> dict[str, Any]:
     app = running_app()
-    preference = {"part": 1, "assembly": 2, "drawing": 3}.get(kind)
+    preference = {
+        "part": SW_DEFAULT_TEMPLATE_PART,
+        "assembly": SW_DEFAULT_TEMPLATE_ASSEMBLY,
+        "drawing": SW_DEFAULT_TEMPLATE_DRAWING,
+    }.get(kind)
     if preference is None:
         return result(False, "kind must be part, assembly, or drawing.")
     template = app.GetUserPreferenceStringValue(preference)
@@ -302,7 +317,7 @@ def rebuild_document(args: dict[str, Any]) -> dict[str, Any]:
     ["red", "green", "blue"],
 )
 def set_appearance(args: dict[str, Any]) -> dict[str, Any]:
-    from sw_core import as_list, enumerate_faces, get_bodies, safe
+    from .sw_core import as_list, enumerate_faces, get_bodies, safe
 
     _, doc = require_part()
     values = (
@@ -328,6 +343,32 @@ def set_appearance(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, f"Applied the colour to {target}.", rgb=[args["red"], args["green"], args["blue"]])
 
 
+def _material_readback(doc: Any, database: str) -> str:
+    """Read the assigned material name back, across the API's several shapes.
+
+    GetMaterialPropertyName2 takes the database as an [in, out] string.  Given
+    a plain Python string, SOLIDWORKS 2016 returns nothing even though the
+    material was applied (the mass changes), so the typed by-reference form is
+    tried first.  MaterialIdName, stable since 2008, reports "database|name"
+    and is the last resort.
+    """
+    for database_arg in (
+        win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_BSTR, database),
+        database,
+    ):
+        try:
+            raw = doc.GetMaterialPropertyName2("", database_arg)
+        except Exception:
+            continue
+        if isinstance(raw, (list, tuple)):
+            raw = raw[0] if raw else ""
+        name = str(raw or "")
+        if name:
+            return name
+    ident = str(safe(doc, "MaterialIdName", "") or "")
+    return ident.split("|", 1)[1] if "|" in ident else ident
+
+
 @tool(
     "set_material",
     "Assign a SOLIDWORKS material to the active part, which is what makes get_mass_properties "
@@ -346,11 +387,7 @@ def set_material(args: dict[str, Any]) -> dict[str, Any]:
         doc.SetMaterialPropertyName2("", database, name)
     except Exception as exc:
         return result(False, f"SOLIDWORKS rejected that material: {exc}")
-    applied = ""
-    try:
-        applied = str(doc.GetMaterialPropertyName2("", database) or "")
-    except Exception:
-        pass
+    applied = _material_readback(doc, database)
     rebuild(doc)
     # An unknown material name is accepted silently and leaves the part
     # unassigned, so treat anything but an exact read-back as a failure.

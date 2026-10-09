@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modified for SOLIDWORKS 2017 support (fork).
 
 """Drawing documents: sheets, views, and annotation.
 
@@ -36,6 +37,7 @@ from .sw_core import (
     active_document,
     as_list,
     byref_long,
+    call_versioned,
     clear_selection,
     document_info,
     document_type,
@@ -70,10 +72,12 @@ VIEW_TYPES = {
     6: "standard", 7: "named", 8: "relative", 9: "detached", 10: "alternate_position",
 }
 
-# swViewDisplayMode_e
+# swDisplayMode_e (what IView.SetDisplayMode3 takes; not swViewDisplayMode_e, which
+# is for IModelView.DisplayMode on part/assembly windows). Shaded with edges is
+# Mode = shaded plus Edges=True, see _apply_view_options.
 DISPLAY_MODES = {
-    "wireframe": 1, "hidden_lines_removed": 2, "hidden_lines_grey": 3,
-    "shaded": 4, "shaded_with_edges": 5,
+    "wireframe": 0, "hidden_lines_grey": 1, "hidden_lines_removed": 2,
+    "shaded": 3, "shaded_with_edges": 3,
 }
 
 # swInsertAnnotation_e, the flags worth exposing on a mechanical drawing.
@@ -108,7 +112,7 @@ CENTER_MARK_STYLES = {"single": 2, "linear": 3, "circular": 4}
 _DRAWING_METHODS = (
     "NewSheet3", "SetupSheet5", "SetupSheet4", "ActivateSheet", "ActivateView",
     "CreateDrawViewFromModelView3", "Create3rdAngleViews2", "Create1stAngleViews2",
-    "CreateUnfoldedViewAt3", "CreateSectionViewAt5", "CreateDetailViewAt4",
+    "CreateUnfoldedViewAt3", "CreateSectionViewAt5", "CreateDetailViewAt4", "CreateDetailViewAt3",
     "InsertModelAnnotations3", "AutoDimension", "InsertCenterMark3", "InsertCenterLine2",
     "AutoInsertCenterMarks2", "SelectEntity",
     "GetSheetNames", "GetFirstView", "GetCurrentSheet",
@@ -433,8 +437,10 @@ def _apply_view_options(view: Any, args: dict[str, Any]) -> None:
     mode = args.get("display_mode")
     if mode:
         try:
+            # Phase 3: verify live that Edges=True alone shows the edges; the help hints
+            # the swDrawingsDefaultDisplayTypeHLREdgesWhenShaded preference may matter.
             flag_methods(view, "SetDisplayMode3").SetDisplayMode3(
-                False, DISPLAY_MODES[str(mode)], False, False
+                False, DISPLAY_MODES[str(mode)], False, str(mode) == "shaded_with_edges"
             )
         except Exception:
             logger.info("Could not set the view display mode.")
@@ -529,7 +535,7 @@ def _draw_in_view(doc: Any, parent_view: str | None, draw: Any) -> tuple[str, An
     if entity is None:
         raise RuntimeError("SOLIDWORKS did not draw the reference geometry in the view.")
     clear_selection(doc)
-    from sw_core import select_object
+    from .sw_core import select_object
 
     if not select_object(doc, entity, mark=0, append=False):
         raise RuntimeError("Could not select the reference geometry just drawn.")
@@ -557,7 +563,7 @@ def _draw_in_view(doc: Any, parent_view: str | None, draw: Any) -> tuple[str, An
     ["place_x_mm", "place_y_mm"],
 )
 def insert_section_view(args: dict[str, Any]) -> dict[str, Any]:
-    from sw_core import empty_variant
+    from .sw_core import empty_variant
 
     _, doc = require_drawing()
     parent = args.get("parent_view")
@@ -573,8 +579,10 @@ def insert_section_view(args: dict[str, Any]) -> dict[str, Any]:
             ),
         )
 
-    # swCreateSectionViewAtOptions_e: 1 = section, 2 = exclude fasteners.
-    options = 1 | (2 if bool(args.get("exclude_fasteners", False)) else 0)
+    # swCreateSectionViewAtOptions_e: 0 = default (aligned with the parent; 1 would be
+    # NotAligned), 64 = ExcludeFasteners (2 is OffsetSection).
+    # Phase 3: verify live whether depth_mm also needs swCreateSectionView_Partial (16).
+    options = 0 | (64 if bool(args.get("exclude_fasteners", False)) else 0)
     view = doc.CreateSectionViewAt5(
         to_m(args["place_x_mm"]), to_m(args["place_y_mm"]), 0.0,
         str(args.get("label", "A")), options, empty_variant(),
@@ -632,15 +640,22 @@ def insert_detail_view(args: dict[str, Any]) -> dict[str, Any]:
             ),
         )
 
-    view = doc.CreateDetailViewAt4(
+    detail_args = (
         to_m(args["place_x_mm"]), to_m(args["place_y_mm"]), 0.0,
-        1,  # swDetailCircleStyle_e: 1 = circle profile
+        2,  # Style, swDetViewStyle_e: 2 = swDetViewLEADER
         float(args.get("scale_numerator", 2)), float(args.get("scale_denominator", 1)),
         str(args.get("label", "I")),
-        2,  # swDetViewStyle_e: 2 = label with a leader
+        1,  # Showtype, swDetCircleShowType_e: 1 = swDetCircleCIRCLE (draw the circle)
         bool(args.get("full_outline", False)),
         bool(args.get("jagged_outline", False)),
         False, 0,
+    )
+    # CreateDetailViewAt3 (2016) stops after FullOutline: no jagged outline,
+    # no fixed-size circle, no border style.
+    view = call_versioned(
+        doc,
+        ("CreateDetailViewAt4", detail_args),
+        ("CreateDetailViewAt3", detail_args[:9]),
     )
     if view is None:
         return result(
@@ -721,7 +736,7 @@ def create_drawing_sketch(args: dict[str, Any]) -> dict[str, Any]:
     ["name"],
 )
 def set_drawing_view(args: dict[str, Any]) -> dict[str, Any]:
-    from sw_core import double_array
+    from .sw_core import double_array
 
     _, doc = require_drawing()
     name = str(args["name"])
@@ -733,9 +748,12 @@ def set_drawing_view(args: dict[str, Any]) -> dict[str, Any]:
         target.Position = double_array([to_m(args["x_mm"]), to_m(args["y_mm"])])
     _apply_view_options(target, args)
     if args.get("tangent_edges"):
-        mode = {"visible": 1, "hidden": 2, "phantom": 3}[str(args["tangent_edges"])]
+        # swDisplayTangentEdges_e: Hidden 0, VisibleAndFonted 1 (phantom), Visible 2.
+        mode = {"visible": 2, "hidden": 0, "phantom": 1}[str(args["tangent_edges"])]
         try:
-            target.TangentEdgeDisplay = mode
+            # IView has no TangentEdgeDisplay property in 2017; the method takes an
+            # argument, so flag it before calling. Phase 3: verify live.
+            flag_methods(target, "SetDisplayTangentEdges2").SetDisplayTangentEdges2(mode)
         except Exception:
             logger.info("Could not set tangent edge display.")
     rebuild(doc)
@@ -904,7 +922,7 @@ def _select_circular_edges(doc: Any, view: Any) -> int:
     view, so a tool that means "mark every hole here" has to build that
     selection itself.
     """
-    from sw_core import nothing
+    from .sw_core import nothing
 
     clear_selection(doc)
     count = 0
