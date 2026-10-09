@@ -9,5 +9,4 @@ Format: Context → Decision → Consequences (→ Alternatives). A decided ADR 
 | [0003](0003-orchestrator-sonnet-subagents-human-gates.md) | Orchestrator + Sonnet subagents, human gates, context handoffs | Accepted |
 | [0004](0004-modeling-rules-delivered-by-server.md) | Modeling rules are a server-delivered rulebook with selective hard gates | **Proposed** (G1/G6) |
 | [0005](0005-live-testing-safety.md) | Live-testing safety on Zach's workstation | Accepted |
-
-Expected next: ADR-0006, the version-fencing mechanism for tools that can't work on 2017 (Phase 4, if needed).
+| [0006](0006-sw2017-tool-fencing.md) | Fencing tools that can't work on SOLIDWORKS 2017 | Accepted |

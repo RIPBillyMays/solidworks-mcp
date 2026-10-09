@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modified for SOLIDWORKS 2017 support (fork).
 
 """Assembly work: components and mates.
 
@@ -32,6 +33,8 @@ from .sw_core import (
     clear_selection,
     component_transform,
     document_info,
+    double_array,
+    flag_methods,
     iter_components,
     logger,
     mm_point,
@@ -86,7 +89,8 @@ def list_components(args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "insert_component",
     "Insert a part or sub-assembly file into the active assembly at the given position. "
-    "Position is millimetres in assembly space.",
+    "Position is millimetres in assembly space and is where the component's ORIGIN lands "
+    "(corrected after insertion on SOLIDWORKS 2017); the result reports origin_mm.",
     {
         "path": {"type": "string", "description": "Full path to the .sldprt or .sldasm file."},
         "x_mm": {"type": "number", "default": 0},
@@ -119,13 +123,57 @@ def insert_component(args: dict[str, Any]) -> dict[str, Any]:
     )
     if component is None:
         return result(False, f"SOLIDWORKS did not insert {path.name} into the assembly.")
+
+    # On 2017 AddComponent5 puts the component's bounding-box centre (not its
+    # origin) at x/y/z, measured live: a part inserted at (0,0,0) had its origin
+    # at minus its bbox centre.  Read the placed origin back and translate by the
+    # difference so x/y/z mean "where the component origin lands".
+    target = [to_m(args.get("x_mm", 0)), to_m(args.get("y_mm", 0)), to_m(args.get("z_mm", 0))]
+    corrected: bool | None = None
+    matrix = component_transform(component)
+    if matrix is not None:
+        shifted = corrective_matrix(matrix, target)
+        if shifted is not None:
+            try:
+                math_utility = value(app, "GetMathUtility")
+                transform = flag_methods(math_utility, "CreateTransform").CreateTransform(double_array(shifted))
+                flag_methods(component, "SetTransformAndSolve2").SetTransformAndSolve2(transform)
+                corrected = True
+            except Exception:
+                logger.info("Could not move %s to the requested origin", path.name, exc_info=True)
+                corrected = False
     rebuild(doc)
-    return result(
+    final_matrix = component_transform(component)
+    origin = mm_point(apply_transform([0.0, 0.0, 0.0], final_matrix)) if final_matrix else None
+    payload = result(
         True,
         f"Inserted {path.name}.",
         component=str(safe(component, "Name2", "")),
         path=str(path),
+        origin_mm=origin,
     )
+    if corrected is False:
+        payload["data"]["warning"] = (
+            "Could not move the component origin to the requested point; origin_mm shows where it landed."
+        )
+    elif corrected:
+        payload["data"]["origin_corrected"] = True
+    return payload
+
+
+def corrective_matrix(matrix: list[float], target_m: list[float], tol_m: float = 1e-9) -> list[float] | None:
+    """Return the MathTransform data with its translation moved to ``target_m``.
+
+    ``matrix`` is the 16-double MathTransform data (translation at 9-11, metres).
+    Returns None when the origin is already within ``tol_m`` of the target.  The
+    placed origin of a component is its transform translation, so the result puts
+    the origin exactly on the target while keeping rotation and scale.
+    """
+    if all(abs(matrix[9 + i] - target_m[i]) <= tol_m for i in range(3)):
+        return None
+    shifted = list(matrix[:16])
+    shifted[9:12] = [float(c) for c in target_m]
+    return shifted
 
 
 @tool(

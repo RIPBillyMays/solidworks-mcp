@@ -78,23 +78,67 @@ def validated_output_path(path: str, allowed_extensions: set[str], allow_overwri
     return output
 
 
-def _save_as(doc: Any, path: str) -> bool:
+def _file_stamp(path: Path) -> tuple[int, int] | None:
+    """(mtime_ns, size) of a file, or None when it does not exist."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
+
+
+# swFileSaveError_e.swGenericSaveError.  2017 SP5 returns it on every .3mf
+# export (with or without swSaveAsOptions_Silent) while writing a valid file.
+_SW_GENERIC_SAVE_ERROR = 1
+
+
+def _benign_3mf_error(path: Path, errors: int) -> bool:
+    """True when ``errors`` is 2017's spurious generic error on a valid .3mf.
+
+    Narrow on purpose: only that exact code, only .3mf, and only when the file
+    is a zip archive (3MF is an OPC zip), so a truncated or empty write still
+    counts as a failure.
+    """
+    if errors != _SW_GENERIC_SAVE_ERROR or path.suffix.lower() != ".3mf":
+        return False
+    try:
+        with path.open("rb") as handle:
+            return handle.read(4) == b"PK"
+    except OSError:
+        return False
+
+
+def _save_as(doc: Any, path: str, report: dict[str, Any] | None = None) -> bool:
+    """Save/export ``doc`` to ``path``; ``report`` (if given) receives errors/warnings codes."""
     output = Path(path).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     errors, warnings = byref_long(0), byref_long(0)
+    before = _file_stamp(output)
 
     # SOLIDWORKS refuses SaveAs onto a path that is already open — including
     # this very document's own path — so that case is a plain Save.
     current = str(value(doc, "GetPathName") or "")
     if current and Path(current).resolve() == output:
         try:
-            if bool(doc.Save3(1, errors, warnings)) and int(errors.value) == 0:
+            saved = bool(doc.Save3(1, errors, warnings))
+            if report is not None:
+                report.update(errors=int(errors.value), warnings=int(warnings.value))
+            if saved and int(errors.value) == 0:
                 return True
         except Exception:
             logger.info("Save3 on the document's own path failed; trying SaveAs")
 
     try:
-        if bool(extension(doc).SaveAs(str(output), 0, 0, nothing(), errors, warnings)) and int(errors.value) == 0:
+        returned = bool(extension(doc).SaveAs(str(output), 0, 0, nothing(), errors, warnings))
+        if report is not None:
+            report.update(errors=int(errors.value), warnings=int(warnings.value))
+        # 2017 writes a valid .3mf yet returns False with a non-zero *warnings*
+        # code, so the return value and warnings are not proof of failure.  What
+        # counts is no error code plus a non-empty file that this call wrote
+        # (new, or changed since before the call when overwriting).
+        after = _file_stamp(output)
+        written = after is not None and after[1] > 0 and (returned or after != before)
+        if written and (int(errors.value) == 0 or _benign_3mf_error(output, int(errors.value))):
             return True
     except Exception:
         logger.info("Extension.SaveAs failed; falling back to ModelDoc2.SaveAs")
@@ -269,12 +313,17 @@ def export_document(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = active_document()
     output = validated_output_path(str(args["path"]), EXPORT_EXTENSIONS, bool(args.get("overwrite", False)))
     clear_selection(doc)
-    exported = _save_as(doc, str(output))
-    return result(
+    codes: dict[str, Any] = {}
+    exported = _save_as(doc, str(output), codes)
+    payload = result(
         exported,
         f"Exported document to {output}." if exported else "SOLIDWORKS failed to export the document.",
         path=str(output),
+        **codes,
     )
+    if exported and codes.get("warnings"):
+        payload["message"] += f" SOLIDWORKS reported warning code {codes['warnings']} (file was written)."
+    return payload
 
 
 @tool(

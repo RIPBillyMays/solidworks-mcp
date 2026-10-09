@@ -66,7 +66,12 @@ WATCHDOG_SECONDS = 60.0
 # ---------------------------------------------------------------------------
 
 PASS, FAIL, SILENT, HANG, SKIP, UNVERIFIED = "PASS", "FAIL", "SILENT-FAIL", "HANG", "SKIP", "UNVERIFIED"
-GOOD = {PASS, UNVERIFIED}
+FENCED = "FENCED"  # ADR-0006: tool deliberately disabled on 2017; acceptable for T4
+GOOD = {PASS, UNVERIFIED, FENCED}
+
+
+class Fenced(Exception):
+    """The tool is fenced (data.fenced is true), so it never touched COM."""
 
 
 class Fail(Exception):
@@ -121,6 +126,25 @@ def step(name: str, tools: tuple[str, ...] | list[str] = (), needs: tuple[str, .
     return decorate
 
 
+def _open_titles() -> set[str] | None:
+    """Titles of all open documents, or None if SOLIDWORKS cannot be queried.
+
+    None (not an empty set) so a failed query can never make every document
+    open after the step look newly created, and therefore suite-owned.
+    """
+    try:
+        from solidworks_mcp.sw_core import as_list, value
+
+        return {str(value(d, "GetTitle")) for d in as_list(value(app(), "GetDocuments"))}
+    except Exception:  # noqa: BLE001 - bookkeeping must never abort a case
+        return None
+
+
+def _own_titles() -> set[str]:
+    """Titles of documents this suite created (never the user's own)."""
+    return set(X.get("owned_titles", set())) | set(X["docs"])
+
+
 def _run_case(name: str, tools: list[str], needs: list[str], fn: Callable[[], Any]) -> None:
     entry: dict[str, Any] = {"case": name, "tools": tools, "status": PASS, "evidence": "", "note": "", "seconds": 0.0}
     blocked = [n for n in needs if STATUS_BY_CASE.get(n) not in GOOD]
@@ -132,9 +156,12 @@ def _run_case(name: str, tools: list[str], needs: list[str], fn: Callable[[], An
         timer.daemon = True
         started = time.time()
         timer.start()
+        titles_before = _open_titles()
         try:
             evidence = fn()
             entry["evidence"] = str(evidence or "")
+        except Fenced as exc:
+            entry["status"], entry["note"] = FENCED, str(exc)
         except Silent as exc:
             entry["status"], entry["note"] = SILENT, str(exc)
         except Unverified as exc:
@@ -148,6 +175,10 @@ def _run_case(name: str, tools: list[str], needs: list[str], fn: Callable[[], An
         finally:
             timer.cancel()
             entry["seconds"] = round(time.time() - started, 2)
+            # Any document that appeared during this step was created by the suite.
+            titles_after = _open_titles()
+            if titles_before is not None and titles_after is not None:
+                X.setdefault("owned_titles", set()).update(titles_after - titles_before)
     STATUS_BY_CASE[name] = entry["status"]
     RESULTS.append(entry)
     _dump()
@@ -170,6 +201,8 @@ def ok(tool_name: str, **args: Any) -> dict[str, Any]:
     payload = call(tool_name, **args)
     if not payload.get("ok"):
         data = payload.get("data") or {}
+        if data.get("fenced"):
+            raise Fenced(f"{tool_name}: {payload.get('message')}")
         extra = f" problems={data['problems']}" if data.get("problems") else ""
         raise Fail(f"{tool_name}: {payload.get('message')}{extra}")
     return payload.get("data") or {}
@@ -699,8 +732,9 @@ def main() -> int:
 
     @step("3.3b chamfer angle_distance (workaround)", ["chamfer"], ["3.2 rename_feature"])
     def _():
-        picks = z_edges_at(30, 20)
-        check(len(picks) == 1, f"Z edge at (30,20): {picks}")
+        # 3.3 already chamfered the (30,20) corner; use a different, still-sharp Z edge.
+        picks = z_edges_at(30, -20)
+        check(len(picks) == 1, f"Z edge at (30,-20): {picks}")
         nf = len(faces())
         v0 = volume()
         ok("chamfer", distance_mm=2, selection={"edges": picks}, mode="angle_distance", angle_deg=45, name="Block_Chamfer2")
@@ -1091,11 +1125,24 @@ def main() -> int:
 
     @step("5.5b rib reverse_material=True", ["rib"], ["5.5a rib bracket"])
     def _():
+        # Independent of 5.5: 5.5 already built the gusset on its part, so a second rib there
+        # adds nothing.  Build a fresh identical bracket and profile.
+        new_part()
+        ok("create_sketch", plane="front", name="Rib2_L")
+        pts = [(0, 0), (40, 0), (40, 5), (5, 5), (5, 40), (0, 40), (0, 0)]
+        for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+            ok("draw_line", x1_mm=x1, y1_mm=y1, x2_mm=x2, y2_mm=y2)
+        ok("close_sketch")
+        ok("boss_extrude", sketch_name="Rib2_L", depth_mm=40, end_condition="mid_plane", name="Rib2_Bracket")
         v_before = volume()
-        ok("rib", thickness_mm=4, sketch_name="Rib_Profile", two_sided=True, reverse_material=True, name="Rib_Gusset2")
+        check(near(v_before, 15000, rel=1e-3), f"fresh bracket volume {v_before}")
+        ok("create_sketch", plane="front", name="Rib2_Profile")
+        ok("draw_line", x1_mm=25, y1_mm=5, x2_mm=5, y2_mm=25)
+        ok("close_sketch")
+        ok("rib", thickness_mm=4, sketch_name="Rib2_Profile", two_sided=True, reverse_material=True, name="Rib_Gusset2")
         v1 = volume()
         check(near(v1 - v_before, 800, rel=1e-2), f"rib added {v1 - v_before:.2f} mm3, expected 800 (triangle 200 x 4)")
-        return f"rib added {v1 - v_before:.2f} (expected 800)"
+        return f"fresh bracket {v_before}; rib added {v1 - v_before:.2f} (expected 800)"
 
     @step("5.6 sweep", ["sweep"], ["0.1 status"])
     def _():
@@ -1382,6 +1429,10 @@ def main() -> int:
         views = model_views()
         check(len(views) == before + 1, f"views {before} -> {len(views)}")
         check(d["view"].get("type") == "section", f"type {d['view'].get('type')}")
+        # TODO(T4, needs live probing): assert depth/geometry. Candidate: compare the
+        # section view's rendered outline or IView.GetOutline extents against the
+        # depth-less section A-A (X["section_view"]); which property reflects a
+        # partial depth in 2017 is unknown without a live probe, so this stays UNVERIFIED.
         raise Unverified(f"section view created with depth_mm=3 ('{d['view']['name']}'); whether depth was honoured (swCreateSectionView_Partial=16) cannot be measured through the API; eyeball in the screenshot")
 
     @step("8.9 insert_detail_view [verify-live #4]", ["insert_detail_view"], ["8.3 insert_standard_views"])
@@ -1495,7 +1546,7 @@ def main() -> int:
         # Close the assembly that references it first.
         for doc_obj in as_list(value(a, "GetDocuments")):
             t = str(value(doc_obj, "GetTitle"))
-            if t not in X["baseline_docs"] and int(value(doc_obj, "GetType")) in (2, 3):
+            if t in _own_titles() and t not in X["baseline_docs"] and int(value(doc_obj, "GetType")) in (2, 3):
                 a.CloseDoc(t)
         a.CloseDoc(title)
         names = [str(value(x, "GetTitle")) for x in as_list(value(a, "GetDocuments"))]
@@ -1522,7 +1573,9 @@ def main() -> int:
         exists = target.is_file()
         size = target.stat().st_size if exists else 0
         if not payload.get("ok"):
-            raise Fail(f"export_document: {payload.get('message')} (file on disk afterwards: {exists}, {size} bytes)")
+            d = payload.get("data") or {}
+            raise Fail(f"export_document: {payload.get('message')} (errors={d.get('errors', payload.get('errors'))}, "
+                       f"warnings={d.get('warnings', payload.get('warnings'))}; file on disk afterwards: {exists}, {size} bytes)")
         n = file_ok(target, 500)
         return f"{target.name} {n} bytes"
 
@@ -1533,7 +1586,12 @@ def main() -> int:
         closed, left = [], []
         for _ in range(3):
             docs = as_list(value(a, "GetDocuments"))
-            mine = [d for d in docs if str(value(d, "GetTitle")) not in X["baseline_docs"]]
+            # Close only documents the suite created (tracked in _run_case / X["docs"]),
+            # never anything else that happens to be open and was not in the baseline.
+            mine = [
+                d for d in docs
+                if str(value(d, "GetTitle")) in _own_titles() and str(value(d, "GetTitle")) not in X["baseline_docs"]
+            ]
             if not mine:
                 break
             mine.sort(key=lambda d: -int(value(d, "GetType")))  # drawings, assemblies, then parts
@@ -1546,7 +1604,11 @@ def main() -> int:
                     left.append(f"{t}: {exc}")
         remaining = [str(value(x, "GetTitle")) for x in as_list(value(a, "GetDocuments"))]
         X["meta"]["docs_remaining"] = remaining
-        check(sorted(remaining) == sorted(X["baseline_docs"]), f"documents still open: {remaining} (baseline {X['baseline_docs']}); errors {left}")
+        foreign = [t for t in remaining if t not in X["baseline_docs"]]
+        if foreign:
+            # Not created by the suite, so left open on purpose; report instead of failing.
+            X["notes"].append(f"cleanup left documents the suite did not create: {foreign}")
+        check(not [t for t in remaining if t in _own_titles()], f"own documents still open: {remaining}; errors {left}")
         return f"closed {len(closed)} documents without saving; session back to baseline {X['baseline_docs']}"
 
     return finish()

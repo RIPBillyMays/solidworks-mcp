@@ -295,7 +295,10 @@ def fillet(args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "chamfer",
     "Chamfer the selected edges or faces. equal_distance uses distance_mm on both sides; "
-    "angle_distance uses distance_mm and angle_deg; distance_distance uses both distances.",
+    "angle_distance uses distance_mm and angle_deg; distance_distance uses both distances. "
+    "SOLIDWORKS 2017 builds nothing for the native equal-distance type, so equal_distance is "
+    "substituted with angle_distance at 45 degrees and the same distance (identical geometry); "
+    "the result reports data.substituted.",
     {
         "distance_mm": {"type": "number", "exclusiveMinimum": 0},
         "selection": SELECTION_SCHEMA,
@@ -317,6 +320,13 @@ def chamfer(args: dict[str, Any]) -> dict[str, Any]:
     exit_active_sketch(doc)
     count = require_selection(doc, args["selection"])
     mode = str(args.get("mode", "equal_distance"))
+    angle_deg = args.get("angle_deg", 45)
+    substituted: str | None = None
+    if mode == "equal_distance":
+        # 2017's InsertFeatureChamfer silently builds nothing for type 16
+        # (equal distance): the feature appears but the geometry is unchanged.
+        # A 45 degree angle-distance chamfer is the same shape, so use that.
+        mode, angle_deg, substituted = "angle_distance", 45, "angle_distance 45°"
     chamfer_type = {
         "equal_distance": CHAMFER_EQUAL_DISTANCE,
         "angle_distance": CHAMFER_ANGLE_DISTANCE,
@@ -329,11 +339,15 @@ def chamfer(args: dict[str, Any]) -> dict[str, Any]:
 
     feature = feature_manager(doc).InsertFeatureChamfer(
         options, chamfer_type, to_m(args["distance_mm"]),
-        to_rad(args.get("angle_deg", 45)), other,
+        to_rad(angle_deg), other,
         0.0, 0.0, 0.0,
     )
     rename_feature(feature, args.get("name"))
-    return feature_result(doc, feature, "chamfer", distance_mm=args["distance_mm"], entities=count)
+    payload = feature_result(doc, feature, "chamfer", distance_mm=args["distance_mm"], entities=count)
+    if substituted:
+        payload.setdefault("data", {})["substituted"] = substituted
+        payload["message"] += f" (equal_distance is not built by SOLIDWORKS 2017; used {substituted}.)"
+    return payload
 
 
 @tool(
@@ -424,35 +438,53 @@ def rib(args: dict[str, Any]) -> dict[str, Any]:
     draft_deg = float(args.get("draft_deg", 0))
     requested = str(args.get("extrude_direction", "parallel_to_sketch")) == "normal_to_sketch"
 
-    def attempt(normal_to_sketch: bool) -> tuple[str, Any]:
+    requested_reverse = bool(args.get("reverse_material", False))
+
+    def attempt(normal_to_sketch: bool, reverse_material: bool) -> tuple[str, Any]:
         name = select_sketch_for_feature(doc, args.get("sketch_name"))
         before = _feature_names(doc)
         feature_manager(doc).InsertRib(
             bool(args.get("two_sided", True)), False, to_m(args["thickness_mm"]), 0,
-            bool(args.get("reverse_material", False)),
+            reverse_material,
             abs(draft_deg) > 1e-12, False, to_rad(draft_deg),
             normal_to_sketch, False,
         )
         return name, _feature_created_after(doc, before)
 
-    sketch, feature = attempt(requested)
-    flipped = False
-    if feature is None:
-        # InsertRib returns void and simply builds nothing when the extrusion
-        # direction cannot reach material, so the other one is worth a try.
-        sketch, feature = attempt(not requested)
-        flipped = feature is not None
+    # InsertRib returns void and simply builds nothing when either the extrusion
+    # direction or the material side is wrong, so try all four combinations
+    # (requested one first, then flipping direction, then material side, then
+    # both).  A corner gusset whose material side is the non-default one never
+    # built when only the direction was retried.  Bounded at four attempts.
+    combos = [
+        (requested, requested_reverse),
+        (not requested, requested_reverse),
+        (requested, not requested_reverse),
+        (not requested, not requested_reverse),
+    ]
+    sketch, feature, used_combo = "", None, combos[0]
+    for combo in combos:
+        sketch, feature = attempt(*combo)
+        used_combo = combo
+        if feature is not None:
+            break
 
     rename_feature(feature, args.get("name"))
     payload = feature_result(doc, feature, "rib", sketch=sketch, thickness_mm=args["thickness_mm"])
-    if flipped:
-        used = "normal_to_sketch" if not requested else "parallel_to_sketch"
-        payload["data"]["extrude_direction"] = used
-        payload["message"] += f" The requested direction built nothing, so {used} was used."
-    elif feature is None:
+    if feature is not None:
+        direction = "normal_to_sketch" if used_combo[0] else "parallel_to_sketch"
+        payload["data"]["extrude_direction"] = direction
+        payload["data"]["reverse_material"] = used_combo[1]
+        if used_combo != combos[0]:
+            payload["data"]["retried"] = True
+            payload["message"] += (
+                f" The requested settings built nothing, so extrude_direction={direction}, "
+                f"reverse_material={used_combo[1]} was used."
+            )
+    else:
         payload["message"] += (
-            " Neither extrusion direction reached material: check that the profile spans between "
-            "two existing faces."
+            " No combination of extrusion direction and material side reached material: check that "
+            "the profile spans between two existing faces."
         )
     return payload
 
