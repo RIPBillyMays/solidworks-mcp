@@ -448,3 +448,79 @@ def set_material(args: dict[str, Any]) -> dict[str, Any]:
             material=applied,
         )
     return result(True, f"Applied material '{name}'.", material=applied)
+
+
+def _open_documents(app: Any) -> list[Any]:
+    return [d for d in as_list(value(app, "GetDocuments")) if d is not None]
+
+
+@tool(
+    "list_open_documents",
+    "Read-only: list every document open in SOLIDWORKS with title, path, type, and unsaved-changes flag.",
+    {},
+)
+def list_open_documents(args: dict[str, Any]) -> dict[str, Any]:
+    app = running_app()
+    documents = [document_info(doc) for doc in _open_documents(app)]
+    return result(True, f"{len(documents)} documents are open.", documents=documents)
+
+
+@tool(
+    "close_document",
+    "Close an open document by title (default: the active document). A document with unsaved changes "
+    "is refused unless save is true (only for files already saved under the outputs folder) or force "
+    "is true (discards changes).",
+    {
+        "title": {"type": "string", "description": "Title as shown by list_open_documents."},
+        "save": {"type": "boolean", "default": False},
+        "force": {"type": "boolean", "default": False},
+    },
+)
+def close_document(args: dict[str, Any]) -> dict[str, Any]:
+    app = running_app()
+    save, force = bool(args.get("save", False)), bool(args.get("force", False))
+    wanted = args.get("title")
+    if wanted:
+        target = None
+        for doc in _open_documents(app):
+            if str(value(doc, "GetTitle")).lower() == str(wanted).lower():
+                target = doc
+                break
+        if target is None:
+            return result(False, f"No open document is titled '{wanted}'. Call list_open_documents.")
+    else:
+        target = app.ActiveDoc
+        if target is None:
+            return result(False, "SOLIDWORKS has no active document to close.")
+    info = document_info(target)
+    title, path = info["title"], info["path"]
+
+    if save:
+        if not path:
+            return result(
+                False,
+                f"'{title}' has never been saved; use save_document first, then close it.",
+                document=info,
+            )
+        try:
+            Path(path).resolve().relative_to(OUTPUT_ROOT)
+        except ValueError:
+            return result(
+                False,
+                f"For safety, save-on-close is only allowed for files under {OUTPUT_ROOT}; '{title}' is elsewhere.",
+                document=info,
+            )
+        errors, warnings = byref_long(0), byref_long(0)
+        if not (bool(target.Save3(1, errors, warnings)) and int(errors.value) == 0):
+            return result(False, f"SOLIDWORKS failed to save '{title}', so it was not closed.", document=info)
+    elif info["dirty"] and not force:
+        return result(
+            False,
+            f"'{title}' has unsaved changes. Save it first, pass save=true (outputs folder only), "
+            "or pass force=true to discard them.",
+            document=info,
+        )
+
+    app.CloseDoc(title)
+    remaining = len(_open_documents(app))
+    return result(True, f"Closed '{title}'.", closed=title, remaining_documents=remaining)

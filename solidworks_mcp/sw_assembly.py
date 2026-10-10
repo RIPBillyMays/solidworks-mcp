@@ -115,6 +115,13 @@ def insert_component(args: dict[str, Any]) -> dict[str, Any]:
         app.OpenDoc6(str(path), doc_type, 1, str(args.get("configuration", "") or ""), errors, warnings)
     except Exception:
         logger.info("Silent open of %s failed; letting AddComponent5 resolve it.", path)
+    # OpenDoc6 makes the opened part the active document; hand activation back to
+    # the assembly so later assembly tools (and the next insert) still see it.
+    try:
+        assembly_title = str(value(doc, "GetTitle"))
+        flag_methods(app, "ActivateDoc3").ActivateDoc3(assembly_title, True, 0, byref_long(0))
+    except Exception:
+        logger.info("Could not re-activate the assembly after loading %s.", path.name)
 
     existing = str(args.get("configuration", "") or "")
     component = doc.AddComponent5(
@@ -288,3 +295,43 @@ def set_component_fixed(args: dict[str, Any]) -> dict[str, Any]:
     clear_selection(doc)
     rebuild(doc)
     return result(True, f"Set fixed={args.get('fixed', True)} on {len(names)} components.", components=names)
+
+
+@tool(
+    "delete_mate",
+    "Delete one mate from the active assembly by its name (see list_mates). Nothing else is deleted.",
+    {"mate_name": {"type": "string"}},
+    ["mate_name"],
+)
+def delete_mate(args: dict[str, Any]) -> dict[str, Any]:
+    from .sw_core import extension, feature_property, iter_feature_objects, selectable
+
+    _, doc = require_assembly()
+    name = str(args["mate_name"])
+    target = None
+    # Mates are sub-features of the MateGroup, which find_feature does not
+    # descend into, so delete_feature cannot reach them.
+    for feature in iter_feature_objects(doc):
+        if str(feature_property(feature, "GetTypeName2", "")) != "MateGroup":
+            continue
+        child = safe(feature, "GetFirstSubFeature")
+        while child is not None:
+            if str(feature_property(child, "Name", "")) == name:
+                target = child
+                break
+            child = safe(child, "GetNextSubFeature")
+        if target is not None:
+            break
+    if target is None:
+        return result(False, f"No mate named '{name}' exists. Call list_mates to see valid names.")
+    clear_selection(doc)
+    if not bool(selectable(target).Select2(False, 0)):
+        return result(False, f"Could not select mate '{name}'.")
+    deleted = bool(extension(doc).DeleteSelection2(0))
+    rebuild(doc)
+    clear_selection(doc)
+    return result(
+        deleted,
+        f"Deleted mate '{name}'." if deleted else "SOLIDWORKS refused to delete the mate.",
+        deleted=name,
+    )

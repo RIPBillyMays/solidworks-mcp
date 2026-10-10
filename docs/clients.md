@@ -6,7 +6,7 @@ Last updated: 2026-10-08 (Phase 5a). Three clients are registered against the sa
 - Claude Desktop (app)
 - Codex CLI
 
-Server executable (all three use it, with no arguments and no environment variables):
+Server executable (all three use it, with no arguments). Claude Code and Claude Desktop also set `SW_MCP_OUTPUT_ROOT=C:\_Projects\solidworks-mcp\sandbox` (added 2026-10-10). Without it, saves default to `~\Documents\solidworks-mcp` and anything under `sandbox\` is refused:
 
 ```
 C:\_Projects\solidworks-mcp\.venv\Scripts\solidworks-mcp.exe
@@ -85,7 +85,10 @@ To pause it without removing, use `/mcp` inside a session and disable the server
   "mcpServers": {
     "solidworks": {
       "command": "C:\\_Projects\\solidworks-mcp\\.venv\\Scripts\\solidworks-mcp.exe",
-      "args": []
+      "args": [],
+      "env": {
+        "SW_MCP_OUTPUT_ROOT": "C:\\_Projects\\solidworks-mcp\\sandbox"
+      }
     }
   }
 }
@@ -93,7 +96,9 @@ To pause it without removing, use `/mcp` inside a session and disable the server
 
 JSON needs doubled backslashes in the path, as shown.
 
-**Backup:** the file as it was before the edit is saved next to it as `claude_desktop_config.json.bak-2026-10-08`. Restoring that copy removes the SOLIDWORKS entry, but also reverts any other change Desktop has made to the file since.
+**Watch out:** on 2026-10-09/10 the whole `mcpServers` key disappeared, probably because Desktop rewrote the file. It was re-added with `env` on 2026-10-10 (backup `.bak-2026-10-10b`). Check that it's still there after every restart.
+
+**Backup:** the file as it was before the original edit is saved next to it as `claude_desktop_config.json.bak-2026-10-08`. Restoring that copy removes the SOLIDWORKS entry, but also reverts any other change Desktop has made to the file since.
 
 **Restart needs:** Claude Desktop only reads this file at startup. **Fully quit the app (right-click the tray icon, Quit; closing the window is not enough) and start it again.** This has not been done as part of Phase 5a. Until you restart, Desktop does not know about the server.
 

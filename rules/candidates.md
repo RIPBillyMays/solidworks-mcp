@@ -67,3 +67,15 @@ Seeded 2026-10-08 from Zach's stated goals and common SOLIDWORKS design-intent p
 - **Rule:** Round or bevel model edges with the `fillet` and `chamfer` **features**, applied to body edges after the base shape exists. Do not bake rounds or bevels into sketch profiles with `sketch_fillet` or `sketch_chamfer`. Sketch fillets and chamfers are reserved for shapes that really are profile geometry, such as a slot end or a cam profile, and the build plan says why.
 - **Why:** Edge-break features are separate, suppressible and editable in the feature tree. Keeping them out of the sketch keeps the sketch simple and fully defined, and lets Zach change or remove a break without reworking the profile. This is common SOLIDWORKS practice (cosmetic features last).
 - *Source: Zach, 2026-10-09 (G4: "are you using the chamfer feature … and the fillet features on the edges and not making the changes in the sketch profiles?").*
+
+### R-010: Check `output_root` before building
+- **Enforcement:** soft
+- **Applies to:** all
+- **Rule:** Call `solidworks_status` first and confirm `output_root` is the approved sandbox before building anything that will be saved. If it is not, stop and tell Zach rather than saving elsewhere.
+- **Why:** Phase 5 T5: the Claude Code registration had no `SW_MCP_OUTPUT_ROOT`, so the finished part could not be saved. It was found only at the end. *(proposed, 2026-10-10)*
+
+### R-011: Re-list faces before every selection
+- **Enforcement:** soft
+- **Applies to:** part
+- **Rule:** Face indices and body names change after each feature. Re-run `list_faces` with a filter (normal, area, point) immediately before every face selection. Never reuse an index from an earlier listing.
+- **Why:** Phase 5 T5: indices moved after the cut, and the body was renamed "CenterHole". *(proposed, 2026-10-10)*
