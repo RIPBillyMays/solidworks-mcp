@@ -56,6 +56,9 @@ from . import sw_file  # noqa: F401
 from . import sw_refgeom  # noqa: F401
 from . import sw_sketch  # noqa: F401
 from . import sw_feature  # noqa: F401
+from . import sw_select  # noqa: F401
+from . import sw_body  # noqa: F401
+from . import sw_docdata  # noqa: F401
 from . import sw_inspect  # noqa: F401
 from . import sw_assembly  # noqa: F401
 from . import sw_drawing  # noqa: F401

@@ -35,6 +35,21 @@ FENCES: dict[str, str] = {
         "IDrawingDoc.AutoDimension is sketch-level auto-dimension in 2017 and adds no "
         "dimensions to a drawing view; use insert_model_annotations"
     ),
+    "combine_bodies": (
+        "IFeatureManager.InsertCombineFeature (and IPartDoc.InsertCombineFeature) return Nothing and "
+        "create no feature for every argument form tried (body objects, by-name selection, marks 0/1/2, "
+        "overlapping or touching bodies); use boss_extrude/cut_extrude with merge=true, or a "
+        "multi-body feature option, instead"
+    ),
+    "set_mass_override": (
+        "IMassProperty.OverrideMass only sets UserAssigned; Mass is unchanged on the same and on a "
+        "fresh calculation object (verified live), and 2017 has no density setter; set the material "
+        "or a custom property instead"
+    ),
+    "redo": (
+        "EditRedo2 and EditRedo are accepted but restore nothing after API-driven changes "
+        "(verified live); recreate the feature instead"
+    ),
 }
 
 PREFIX = "NOT SUPPORTED ON SOLIDWORKS 2017: "

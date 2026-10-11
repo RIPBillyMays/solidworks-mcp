@@ -512,6 +512,44 @@ def dimension_dialog_suppressed(app: Any) -> Iterator[None]:
                 logger.info("Could not restore the SOLIDWORKS dimension-input dialog setting.")
 
 
+# Toggles that can raise a modal box while a feature is being built or rebuilt:
+# swInputDimValOnCreate (10) and swShowErrorsEveryRebuild (77).  Feature APIs
+# run a rebuild, and a rebuild error dialog blocks the COM call forever.
+FEATURE_DIALOG_TOGGLES = (10, 77)
+
+
+@contextmanager
+def dialogs_suppressed(app: Any = None, toggles: Sequence[int] = FEATURE_DIALOG_TOGGLES) -> Iterator[None]:
+    """Generic form of ``dimension_dialog_suppressed``: switch several dialog
+    toggles off for the duration of a block and restore each one afterwards.
+
+    Each toggle is handled independently, so a build that rejects one still
+    gets the others suppressed.  Never raises on the way in or out.
+    """
+    if app is None:
+        try:
+            app = running_app()
+        except Exception:
+            app = None
+    saved: dict[int, bool] = {}
+    if app is not None:
+        for toggle in toggles:
+            try:
+                previous = bool(app.GetUserPreferenceToggle(toggle))
+                app.SetUserPreferenceToggle(toggle, False)
+                saved[toggle] = previous
+            except Exception:
+                logger.info("Could not suppress SOLIDWORKS dialog toggle %s.", toggle)
+    try:
+        yield
+    finally:
+        for toggle, previous in saved.items():
+            try:
+                app.SetUserPreferenceToggle(toggle, previous)
+            except Exception:
+                logger.info("Could not restore SOLIDWORKS dialog toggle %s.", toggle)
+
+
 def active_document() -> tuple[Any, Any]:
     app = running_app()
     doc = app.ActiveDoc
@@ -1403,8 +1441,14 @@ def apply_selection(doc: Any, spec: dict[str, Any] | None, mark: int = 0, append
         index = int(raw_index)
         if not 0 <= index < len(bodies):
             raise RuntimeError(f"Body index {index} is out of range (0..{len(bodies) - 1}).")
-        if not select_object(doc, bodies[index], mark, True):
-            raise RuntimeError(f"Could not select body {index}.")
+        # Live 2017: IBody2.Select4 reports success but selects a different body (index 0 picked
+        # body 1 and vice versa) or refuses, so a part's bodies are picked by name as SOLIDBODY
+        # first; the object route stays as the fallback (assemblies, duplicate names).
+        body_name = str(safe(bodies[index], "Name", "") or "")
+        by_name = bool(body_name) and document_type(doc) == 1 and select_by_id(doc, body_name, "SOLIDBODY", mark, True, ext)
+        if not by_name and not select_object(doc, bodies[index], mark, True):
+            if not (body_name and select_by_id(doc, body_name, "SOLIDBODY", mark, True, ext)):
+                raise RuntimeError(f"Could not select body {index}.")
         count += 1
 
     if spec.get("components"):

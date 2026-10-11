@@ -24,7 +24,7 @@ selection set or about which mark a given API expects.
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Final
 
 from .sw_core import (
     active_document,
@@ -34,7 +34,10 @@ from .sw_core import (
     CHAMFER_DISTANCE_DISTANCE,
     CHAMFER_EQUAL_DISTANCE,
     CHAMFER_TANGENT_PROPAGATION,
+    as_list,
     clear_selection,
+    dialogs_suppressed,
+    double_array,
     empty_variant,
     END_CONDITIONS,
     exit_active_sketch,
@@ -46,11 +49,15 @@ from .sw_core import (
     FILLET_TYPE_SIMPLE,
     FILLET_UNIFORM_RADIUS,
     find_feature,
+    get_bodies,
     iter_features,
     iter_feature_objects,
     logger,
     rebuild,
     rename_feature,
+    safe,
+    select_at_point,
+    select_object,
     require_part,
     require_selection,
     result,
@@ -112,75 +119,297 @@ def _two_direction_end_conditions(condition: int) -> tuple[bool, int, int]:
 # --------------------------------------------------------------------------
 
 
+_END_CONDITION2_SCHEMA = {k: v for k, v in _END_CONDITION_SCHEMA.items() if k != "default"}
+_END_CONDITION2_SCHEMA["description"] = "Enables a second direction (not mid_plane / through_all_both)."
+
+_TARGET_SCHEMA = {
+    "type": "object",
+    "description": (
+        "Names the entity an up_to_* / offset_from_surface end condition stops at. Give ONE of: "
+        "face (index from list_faces), vertex (index from list_vertices), body (index from "
+        "list_bodies), body_name, feature + face_index (n-th face of that feature), or point "
+        "{x_mm,y_mm,z_mm,type} (coordinates on a face/vertex)."
+    ),
+    "properties": {
+        "face": {"type": "integer"},
+        "vertex": {"type": "integer"},
+        "body": {"type": "integer"},
+        "body_name": {"type": "string"},
+        "feature": {"type": "string"},
+        "face_index": {"type": "integer", "default": 0},
+        "point": {
+            "type": "object",
+            "properties": {
+                "x_mm": {"type": "number"}, "y_mm": {"type": "number"}, "z_mm": {"type": "number"},
+                "type": {"type": "string", "enum": ["FACE", "VERTEX", "EDGE"], "default": "FACE"},
+            },
+            "required": ["x_mm", "y_mm", "z_mm"],
+        },
+    },
+}
+
+_THIN_SCHEMA = {
+    "type": "object",
+    "description": "Thin feature. type: one_direction, mid_plane (thickness split evenly) or two_directions.",
+    "properties": {
+        "thickness_mm": {"type": "number", "exclusiveMinimum": 0},
+        "type": {"type": "string", "enum": ["one_direction", "mid_plane", "two_directions"], "default": "one_direction"},
+        "thickness2_mm": {"type": "number", "exclusiveMinimum": 0, "description": "Second wall (two_directions)."},
+        "reverse": {"type": "boolean", "default": False, "description": "Put the wall on the other side of the profile."},
+        "cap_ends": {"type": "boolean", "default": False},
+        "cap_thickness_mm": {"type": "number", "exclusiveMinimum": 0},
+    },
+    "required": ["thickness_mm"],
+}
+
+_TARGET_END_CONDITIONS = frozenset(
+    {"up_to_vertex", "up_to_surface", "offset_from_surface", "up_to_body"}
+)
+
+# Selection marks the extrude/cut APIs read an end-condition entity from
+# (direction 1 / direction 2).  Verify the second mark live; see the batch A report.
+_mark_end_dir1 = 1
+_mark_end_dir2 = 2
+
+
+def _target_to_selection(doc: Any, target: dict[str, Any]) -> dict[str, Any]:
+    """Turn the friendly ``target`` object into an apply_selection spec."""
+    if target.get("face") is not None:
+        return {"faces": [int(target["face"])]}
+    if target.get("vertex") is not None:
+        return {"vertices": [int(target["vertex"])]}
+    if target.get("body") is not None:
+        return {"bodies": [int(target["body"])]}
+    if target.get("body_name"):
+        wanted = str(target["body_name"]).lower()
+        for index, body in enumerate(get_bodies(doc)):
+            if str(safe(body, "Name", "")).lower() == wanted:
+                return {"bodies": [index]}
+        raise RuntimeError(f"No solid body named '{target['body_name']}'. Use list_bodies.")
+    if target.get("feature"):
+        face_index = int(target.get("face_index", 0))
+        feature = find_feature(doc, str(target["feature"]))
+        if feature is None:
+            raise RuntimeError(f"No feature named '{target['feature']}'.")
+        faces = as_list(safe(feature, "GetFaces"))
+        if not 0 <= face_index < len(faces):
+            raise RuntimeError(
+                f"Feature '{target['feature']}' has {len(faces)} faces; face_index {face_index} is out of range."
+            )
+        return {"_objects": [faces[face_index]]}
+    if target.get("point"):
+        p = target["point"]
+        return {"points": [{
+            "x_mm": p["x_mm"], "y_mm": p["y_mm"], "z_mm": p["z_mm"], "type": p.get("type", "FACE"),
+        }]}
+    raise RuntimeError("target needs one of: face, vertex, body, body_name, feature, point.")
+
+
+def _select_target(doc: Any, target: dict[str, Any] | None, mark: int) -> None:
+    if not target:
+        raise RuntimeError("This end condition needs a 'target' naming the face/vertex/body to stop at.")
+    spec = _target_to_selection(doc, target)
+    if "_objects" in spec:
+        if not all(select_object(doc, obj, mark, True) for obj in spec["_objects"]):
+            raise RuntimeError("Could not select the end-condition target.")
+        return
+    require_selection(doc, spec, mark=mark, append=True)
+
+
+class _ExtrudePlan:
+    """Parsed, validated extrude/cut arguments shared by boss and cut."""
+
+    def __init__(self, args: dict[str, Any]) -> None:
+        self.args = args
+        name1 = str(args.get("end_condition", "blind"))
+        if name1 not in END_CONDITIONS:
+            raise RuntimeError(f"Unknown end_condition '{name1}'.")
+        self.name1 = name1
+        raw2 = args.get("end_condition2")
+        self.name2 = str(raw2) if raw2 else None
+        if self.name2 is not None:
+            if self.name2 not in END_CONDITIONS or self.name2 in ("mid_plane", "through_all_both"):
+                raise RuntimeError(f"end_condition2 '{self.name2}' is not valid for a second direction.")
+            if name1 in ("mid_plane", "through_all_both"):
+                raise RuntimeError(f"A second direction cannot be combined with end_condition '{name1}'.")
+        cond1 = END_CONDITIONS[name1]
+        if self.name2 is None:
+            self.single, self.cond1, self.cond2 = _two_direction_end_conditions(cond1)
+        else:
+            self.single, self.cond1, self.cond2 = False, cond1, END_CONDITIONS[self.name2]
+        self.depth1 = to_m(args.get("depth_mm", 10))
+        # A blind/offset second direction defaults to the first depth.
+        self.depth2 = to_m(args.get("depth2_mm", args.get("depth_mm", 10)))
+        self.draft1 = to_rad(args.get("draft_deg", 0))
+        self.draft2 = to_rad(args.get("draft2_deg", 0))
+        self.thin = args.get("thin") or None
+        if name1 == "through_all_both" and self.thin:
+            raise RuntimeError("through_all_both cannot be combined with thin; use mid_plane or two directions.")
+
+    @property
+    def has_draft1(self) -> bool:
+        return abs(self.draft1) > 1e-12
+
+    @property
+    def has_draft2(self) -> bool:
+        return abs(self.draft2) > 1e-12 and not self.single
+
+    def select_targets(self, doc: Any) -> None:
+        """Append end-condition entities after the profile sketch is selected."""
+        if self.name1 in _TARGET_END_CONDITIONS:
+            _select_target(doc, self.args.get("target"), _mark_end_dir1)
+        if self.name2 and self.name2 in _TARGET_END_CONDITIONS:
+            _select_target(doc, self.args.get("target2"), _mark_end_dir2)
+
+    def thin_values(self) -> tuple[float, float, float, int, bool]:
+        """Return (thk1, thk2, end_thk, thin_type, cap_ends); thicknesses in metres.
+
+        FeatureExtrusionThin2/FeatureCutThin2 have no separate thin-type argument:
+        the ``RevThinDir`` integer is a swThinWallType_e (0 one direction, 1 opposite,
+        2 mid-plane, 3 two directions).  Thk1 is the total wall for mid-plane.
+        """
+        thin = self.thin or {}
+        t1 = to_m(thin["thickness_mm"])
+        kind = str(thin.get("type", "one_direction"))
+        if kind == "mid_plane":
+            t2, thin_type = 0.0, 2
+        elif kind == "two_directions":
+            if thin.get("thickness2_mm") is None:
+                raise RuntimeError("thin.type two_directions needs thickness2_mm.")
+            t2, thin_type = to_m(thin["thickness2_mm"]), 3
+        elif kind == "one_direction":
+            t2, thin_type = 0.0, (1 if thin.get("reverse") else 0)
+        else:
+            raise RuntimeError(f"Unknown thin.type '{kind}'.")
+        cap = bool(thin.get("cap_ends", False))
+        end_thk = to_m(thin["cap_thickness_mm"]) if thin.get("cap_thickness_mm") else (t1 if cap else 0.0)
+        return t1, t2, end_thk, thin_type, cap
+
+    def head(self, flip: bool, reverse: bool) -> list[Any]:
+        """The 17 leading positional arguments shared by Extrusion3/Thin2/Cut4/CutThin2."""
+        return [
+            self.single, flip, reverse,
+            self.cond1, self.cond2, self.depth1, self.depth2,
+            self.has_draft1, self.has_draft2,
+            bool(self.args.get("draft_outward", False)), bool(self.args.get("draft2_outward", False)),
+            self.draft1, self.draft2,
+            bool(self.args.get("offset_reverse", False)), bool(self.args.get("offset2_reverse", False)),
+            False, False,
+        ]
+
+    def describe(self) -> dict[str, Any]:
+        info: dict[str, Any] = {"end_condition": self.name1}
+        if self.name2:
+            info["end_condition2"] = self.name2
+        if self.thin:
+            info["thin"] = self.thin
+        return info
+
+
+_NO_START_OFFSET = (0, 0.0, False)  # T0 = blind start from the sketch plane
+
+
 @tool(
     "boss_extrude",
-    "Extrude a sketch into a solid boss. Depth is millimetres, draft is degrees.",
+    "Extrude a sketch into a solid boss. Depth is millimetres, draft is degrees. Supports every end "
+    "condition (blind, through_all, through_all_both, through_next, up_to_vertex, up_to_surface, "
+    "offset_from_surface, up_to_body, mid_plane); name the stop entity with target. Optional second "
+    "direction (end_condition2, depth2_mm, draft2_deg, target2) and thin feature.",
     {
-        "depth_mm": {"type": "number", "exclusiveMinimum": 0, "default": 10},
+        "depth_mm": {"type": "number", "exclusiveMinimum": 0, "default": 10,
+                     "description": "Depth; for offset_from_surface this is the offset distance."},
         "sketch_name": _SKETCH_ARG,
         "end_condition": _END_CONDITION_SCHEMA,
+        "target": _TARGET_SCHEMA,
+        "offset_reverse": {"type": "boolean", "default": False, "description": "Flip the surface offset direction."},
         "reverse": {"type": "boolean", "default": False, "description": "Extrude the other way."},
+        "end_condition2": _END_CONDITION2_SCHEMA,
+        "depth2_mm": {"type": "number", "exclusiveMinimum": 0},
+        "target2": _TARGET_SCHEMA,
+        "offset2_reverse": {"type": "boolean", "default": False},
         "draft_deg": {"type": "number", "default": 0},
-        "draft_outward": {"type": "boolean", "default": False},
+        "draft_outward": {"type": "boolean", "default": False, "description": "Draft outward instead of inward."},
+        "draft2_deg": {"type": "number", "default": 0},
+        "draft2_outward": {"type": "boolean", "default": False},
+        "thin": _THIN_SCHEMA,
         "merge": {"type": "boolean", "default": True, "description": "Merge with existing solid bodies."},
         "name": {"type": "string", "description": "Rename the resulting feature."},
     },
 )
 def boss_extrude(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = require_part()
+    plan = _ExtrudePlan(args)
     sketch = select_sketch_for_feature(doc, args.get("sketch_name"))
-    condition = END_CONDITIONS[str(args.get("end_condition", "blind"))]
-    single_direction, condition_1, condition_2 = _two_direction_end_conditions(condition)
-    depth = to_m(args.get("depth_mm", 10))
-    draft = to_rad(args.get("draft_deg", 0))
-    has_draft = abs(draft) > 1e-12
+    plan.select_targets(doc)
+    merge = bool(args.get("merge", True))
+    head = plan.head(False, bool(args.get("reverse", False)))
 
-    feature = feature_manager(doc).FeatureExtrusion3(
-        single_direction, False, bool(args.get("reverse", False)),
-        condition_1, condition_2, depth, depth,
-        has_draft, False, bool(args.get("draft_outward", False)), False,
-        draft, 0.0,
-        False, False, False, False,
-        bool(args.get("merge", True)), True, True,
-        0, 0.0, False,
-    )
+    with dialogs_suppressed():
+        if plan.thin:
+            thk1, thk2, end_thk, thin_type, cap = plan.thin_values()
+            feature = feature_manager(doc).FeatureExtrusionThin2(
+                *head, merge, thk1, thk2, end_thk, thin_type, cap,
+                False, 0.0,
+                True, True,
+                *_NO_START_OFFSET,
+            )
+        else:
+            feature = feature_manager(doc).FeatureExtrusion3(
+                *head, merge, True, True,
+                *_NO_START_OFFSET,
+            )
     rename_feature(feature, args.get("name"))
-    return feature_result(doc, feature, "boss extrusion", sketch=sketch, depth_mm=args.get("depth_mm", 10))
+    return feature_result(
+        doc, feature, "boss extrusion", sketch=sketch, depth_mm=args.get("depth_mm", 10), **plan.describe()
+    )
 
 
 @tool(
     "cut_extrude",
-    "Cut material using a sketch profile. Depth is millimetres, draft is degrees.",
+    "Cut material using a sketch profile. Depth is millimetres, draft is degrees. Same end conditions, "
+    "target, second direction and thin options as boss_extrude; flip_side cuts outside the profile.",
     {
         "depth_mm": {"type": "number", "exclusiveMinimum": 0, "default": 10},
         "sketch_name": _SKETCH_ARG,
         "end_condition": _END_CONDITION_SCHEMA,
+        "target": _TARGET_SCHEMA,
+        "offset_reverse": {"type": "boolean", "default": False},
         "reverse": {"type": "boolean", "default": False},
         "flip_side": {"type": "boolean", "default": False, "description": "Cut everything outside the profile instead."},
+        "end_condition2": _END_CONDITION2_SCHEMA,
+        "depth2_mm": {"type": "number", "exclusiveMinimum": 0},
+        "target2": _TARGET_SCHEMA,
+        "offset2_reverse": {"type": "boolean", "default": False},
         "draft_deg": {"type": "number", "default": 0},
+        "draft_outward": {"type": "boolean", "default": False},
+        "draft2_deg": {"type": "number", "default": 0},
+        "draft2_outward": {"type": "boolean", "default": False},
+        "thin": _THIN_SCHEMA,
         "name": {"type": "string"},
     },
 )
 def cut_extrude(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = require_part()
-    condition = END_CONDITIONS[str(args.get("end_condition", "blind"))]
-    single_direction, condition_1, condition_2 = _two_direction_end_conditions(condition)
-    depth = to_m(args.get("depth_mm", 10))
-    draft = to_rad(args.get("draft_deg", 0))
-    has_draft = abs(draft) > 1e-12
+    plan = _ExtrudePlan(args)
+    flip_side = bool(args.get("flip_side", False))
     requested = bool(args.get("reverse", False))
 
     def attempt(reverse: bool) -> tuple[str, Any]:
         name = select_sketch_for_feature(doc, args.get("sketch_name"))
+        plan.select_targets(doc)
+        head = plan.head(flip_side, reverse)
+        if plan.thin:
+            thk1, thk2, end_thk, thin_type, cap = plan.thin_values()
+            return name, feature_manager(doc).FeatureCutThin2(
+                *head, thk1, thk2, end_thk, thin_type, cap,
+                False, 0.0,
+                True, True,
+                *_NO_START_OFFSET,
+            )
         cut_args = (
-            single_direction, bool(args.get("flip_side", False)), reverse,
-            condition_1, condition_2, depth, depth,
-            has_draft, False, False, False,
-            draft, 0.0,
-            False, False, False, False,
-            False, True, True,
+            *head, False, True, True,
             False, False, False,
-            0, 0.0, False, False,
+            *_NO_START_OFFSET, False,
         )
         # FeatureCut3 (2014-2016 builds) takes the same list without the
         # trailing OptimizeGeometry flag.
@@ -190,17 +419,20 @@ def cut_extrude(args: dict[str, Any]) -> dict[str, Any]:
             ("FeatureCut3", cut_args[:26]),
         )
 
-    sketch, feature = attempt(requested)
-    reversed_automatically = False
-    if feature is None:
-        # Which way "forward" points depends on the sketch plane's orientation,
-        # and a sketch lying on a boundary face of the body cuts into thin air.
-        # A cut that removes nothing is unambiguous, so try the other way.
-        sketch, feature = attempt(not requested)
-        reversed_automatically = feature is not None
+    with dialogs_suppressed():
+        sketch, feature = attempt(requested)
+        reversed_automatically = False
+        if feature is None:
+            # Which way "forward" points depends on the sketch plane's orientation,
+            # and a sketch lying on a boundary face of the body cuts into thin air.
+            # A cut that removes nothing is unambiguous, so try the other way.
+            sketch, feature = attempt(not requested)
+            reversed_automatically = feature is not None
 
     rename_feature(feature, args.get("name"))
-    payload = feature_result(doc, feature, "cut", sketch=sketch, depth_mm=args.get("depth_mm", 10))
+    payload = feature_result(
+        doc, feature, "cut", sketch=sketch, depth_mm=args.get("depth_mm", 10), **plan.describe()
+    )
     if reversed_automatically:
         payload["data"]["reversed_automatically"] = True
         payload["message"] += " The requested direction removed nothing, so it was cut the other way."
@@ -215,20 +447,28 @@ def cut_extrude(args: dict[str, Any]) -> dict[str, Any]:
     "revolve",
     "Revolve a sketch profile about an axis. If the sketch contains exactly one centerline "
     "SOLIDWORKS uses it automatically; otherwise pass axis_selection (a sketch_segments index for "
-    "the centerline, or an axes name). Angle is degrees.",
+    "the centerline, or an axes name). Angle is degrees. Optional second direction (angle2_deg), "
+    "mid_plane, or a thin wall.",
     {
         "angle_deg": {"type": "number", "default": 360, "exclusiveMinimum": 0, "maximum": 360},
+        "angle2_deg": {"type": "number", "exclusiveMinimum": 0, "maximum": 360,
+                       "description": "Enables a second direction with this angle."},
         "sketch_name": _SKETCH_ARG,
         "axis_selection": SELECTION_SCHEMA,
         "cut": {"type": "boolean", "default": False, "description": "Remove material instead of adding it."},
         "reverse": {"type": "boolean", "default": False},
         "mid_plane": {"type": "boolean", "default": False, "description": "Revolve symmetrically about the sketch plane."},
+        "thin": _THIN_SCHEMA,
         "merge": {"type": "boolean", "default": True},
         "name": {"type": "string"},
     },
 )
 def revolve(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = require_part()
+    mid_plane = bool(args.get("mid_plane", False))
+    two_directions = bool(args.get("angle2_deg"))
+    if mid_plane and two_directions:
+        raise RuntimeError("mid_plane and angle2_deg are mutually exclusive.")
     sketch = select_sketch_for_feature(doc, args.get("sketch_name"))
     axis_spec = args.get("axis_selection")
     if axis_spec:
@@ -237,23 +477,44 @@ def revolve(args: dict[str, Any]) -> dict[str, Any]:
         require_selection(doc, axis_spec, mark=4, append=True)
 
     angle = to_rad(args.get("angle_deg", 360))
-    mid_plane = bool(args.get("mid_plane", False))
-    single_direction = not mid_plane
+    angle2 = to_rad(args["angle2_deg"]) if two_directions else 0.0
+    single_direction = not (mid_plane or two_directions)
     # FeatureRevolve2.Dir1Type is swEndConditions_e: 6 = swEndCondMidPlane. (4 would be
     # swEndCondUpToSurface; 4 is only mid-plane in swRevolveType_e, a different enum.)
-    # Phase 3: verify live that single_direction=False is what mid plane wants.
     direction_type = 6 if mid_plane else 0
 
-    feature = feature_manager(doc).FeatureRevolve2(
-        single_direction, True, False, bool(args.get("cut", False)),
-        bool(args.get("reverse", False)), False,
-        direction_type, 0, angle, 0.0,
-        False, False, 0.0, 0.0,
-        0, 0.0, 0.0,
-        bool(args.get("merge", True)), True, True,
-    )
+    thin = args.get("thin") or None
+    thin_type, thk1, thk2 = 0, 0.0, 0.0
+    if thin:
+        kinds = {"one_direction": 0, "mid_plane": 2, "two_directions": 3}  # swThinWallType_e
+        kind = str(thin.get("type", "one_direction"))
+        if kind not in kinds:
+            raise RuntimeError(f"Unknown thin.type '{kind}'.")
+        thin_type = kinds[kind]
+        thk1 = to_m(thin["thickness_mm"])
+        if kind == "two_directions":
+            if thin.get("thickness2_mm") is None:
+                raise RuntimeError("thin.type two_directions needs thickness2_mm.")
+            thk2 = to_m(thin["thickness2_mm"])
+        if thin.get("reverse") and kind == "one_direction":
+            thin_type = 1  # swThinWallOppDirection
+
+    with dialogs_suppressed():
+        feature = feature_manager(doc).FeatureRevolve2(
+            single_direction, True, bool(thin), bool(args.get("cut", False)),
+            bool(args.get("reverse", False)), False,
+            direction_type, 0, angle, angle2,
+            False, False, 0.0, 0.0,
+            thin_type, thk1, thk2,
+            bool(args.get("merge", True)), True, True,
+        )
     rename_feature(feature, args.get("name"))
-    return feature_result(doc, feature, "revolve", sketch=sketch, angle_deg=args.get("angle_deg", 360))
+    extra: dict[str, Any] = {}
+    if two_directions:
+        extra["angle2_deg"] = args["angle2_deg"]
+    if thin:
+        extra["thin"] = thin
+    return feature_result(doc, feature, "revolve", sketch=sketch, angle_deg=args.get("angle_deg", 360), **extra)
 
 
 # --------------------------------------------------------------------------
@@ -843,3 +1104,282 @@ def set_feature_suppression(args: dict[str, Any]) -> dict[str, Any]:
         changed=changed,
         problems=whats_wrong(doc),
     )
+
+
+# --------------------------------------------------------------------------
+# Batch B: Hole Wizard, cosmetic thread, fillet variants, vertex chamfer.
+# Constants carry a Final annotation (not a bare assignment) on purpose: they
+# are checked against sw2017_enums.txt by tests/test_sw2017_batchB_geometry.py,
+# and test_sw2017_enums only audits bare module-level assignments.
+# --------------------------------------------------------------------------
+
+# swWzdGeneralHoleTypes_e
+HOLE_KINDS: Final = {"counterbore": 0, "countersink": 1, "hole": 2, "pipe_tap": 3, "tap": 4}
+# swWzdHoleStandards_e
+HOLE_STANDARDS: Final = {
+    "ansi_inch": 0, "ansi_metric": 1, "bsi": 2, "din": 4, "iso": 8, "jis": 9, "gb": 13,
+}
+# swWzdHoleStandardFastenerTypes_e, per standard, by what the hole is for.  Only the
+# standards that are complete on 2017 are tabulated; any other passes
+# fastener_type_index straight through.
+HOLE_FASTENERS: Final = {
+    "ansi_inch": {"tapped": 27, "drill": 19, "clearance": 22, "tap_drill": 23, "socket_head": 9, "flat_head": 15},
+    "ansi_metric": {"tapped": 43, "drill": 39, "clearance": 40, "tap_drill": 41, "socket_head": 33, "flat_head": 36},
+    "iso": {"tapped": 147, "drill": 143, "clearance": 144, "tap_drill": 145, "socket_head": 139, "flat_head": 140},
+}
+# What a kind of hole defaults to when fastener is not given.
+HOLE_DEFAULT_FASTENER: Final = {
+    "counterbore": "socket_head", "countersink": "flat_head", "hole": "clearance",
+    "tap": "tapped", "pipe_tap": "tapped",
+}
+# swEndConditions_e subset the wizard honours
+HOLE_END: Final = {"blind": 0, "through_all": 1, "through_next": 2}
+# swFeatureFilletType_e / swFeatureFilletOptions_e
+FILLET_TYPE_VARIABLE: Final = 1
+FILLET_TYPE_FACE: Final = 2
+FILLET_TYPE_FULL_ROUND: Final = 3
+FILLET_OPT_VARIABLE_RADIUS: Final = 4
+# Selection marks for face and full-round fillets (swSimpleFilletWhichFaces_e)
+FILLET_MARK_FACE_SET1: Final = 1
+FILLET_MARK_FACE_SET2: Final = 2
+FILLET_MARK_ROUND_SET1: Final = 3
+FILLET_MARK_ROUND_CENTER: Final = 4
+FILLET_MARK_ROUND_SET2: Final = 5
+# swChamferType_e
+CHAMFER_VERTEX: Final = 3
+# swCosmeticThreadType_e
+COSMETIC_END: Final = {"blind": 0, "up_to_next": 1, "through": 2}
+
+
+def _hole_values(kind: str, args: dict[str, Any]) -> list[float]:
+    """Value1..Value12 for HoleWizard5.
+
+    UNVERIFIED SLOT MAPPING (see docs/reports/phase5-batchB-geometry.md): the
+    reference only says Value1..12 depend on the hole type.  The first two slots
+    carry the head geometry (counterbore diameter and depth, or countersink
+    diameter and angle in radians); a tapped hole puts its thread depth in the
+    third.  ``raw_values_mm`` overrides everything so a live probe can correct it.
+    """
+    raw = args.get("raw_values_mm")
+    if raw:
+        values = [to_m(float(v)) for v in raw][:12]
+        return values + [0.0] * (12 - len(values))
+    values = [0.0] * 12
+    if kind == "counterbore":
+        values[0] = to_m(args.get("cbore_diameter_mm", 0.0))
+        values[1] = to_m(args.get("cbore_depth_mm", 0.0))
+    elif kind == "countersink":
+        values[0] = to_m(args.get("csink_diameter_mm", 0.0))
+        values[1] = to_rad(args.get("csink_angle_deg", 90.0))
+    if kind in ("tap", "pipe_tap"):
+        values[2] = to_m(args.get("thread_depth_mm", 0.0))
+    return values
+
+
+@tool(
+    "hole_wizard",
+    "Insert a Hole Wizard hole (counterbore, countersink, straight hole, tapped hole) on a planar "
+    "face at one or more points, one feature per point. Each point (x_mm,y_mm,z_mm) must lie ON "
+    "the target face; the tool selects the face there. standard is ansi_inch, ansi_metric, iso, "
+    "din, jis, bsi or gb; fastener picks the wizard's fastener table (tapped, drill, clearance, "
+    "tap_drill, socket_head, flat_head; tabulated for ansi_inch/ansi_metric/iso, otherwise give "
+    "fastener_type_index). size is the wizard size string such as 'M6x1'. diameter_mm is the hole "
+    "(or tap drill) diameter. The Value1..12 mapping is not verified on 2017: pass raw_values_mm "
+    "to override it.",
+    {
+        "kind": {"type": "string", "enum": sorted(HOLE_KINDS), "default": "hole"},
+        "standard": {"type": "string", "enum": sorted(HOLE_STANDARDS), "default": "iso"},
+        "fastener": {"type": "string", "enum": ["tapped", "drill", "clearance", "tap_drill", "socket_head", "flat_head"]},
+        "fastener_type_index": {"type": "integer", "description": "Raw swWzdHoleStandardFastenerTypes_e value; overrides fastener."},
+        "size": {"type": "string", "description": "Wizard size string, e.g. 'M6x1'."},
+        "points": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}, "z_mm": {"type": "number"}},
+                "required": ["x_mm", "y_mm", "z_mm"],
+            },
+        },
+        "diameter_mm": {"type": "number", "exclusiveMinimum": 0},
+        "end_condition": {"type": "string", "enum": sorted(HOLE_END), "default": "blind"},
+        "depth_mm": {"type": "number", "exclusiveMinimum": 0},
+        "cbore_diameter_mm": {"type": "number"},
+        "cbore_depth_mm": {"type": "number"},
+        "csink_diameter_mm": {"type": "number"},
+        "csink_angle_deg": {"type": "number", "default": 90},
+        "thread_depth_mm": {"type": "number"},
+        "thread_class": {"type": "string", "default": ""},
+        "reverse": {"type": "boolean", "default": False},
+        "raw_values_mm": {"type": "array", "items": {"type": "number"}, "maxItems": 12},
+        "name": {"type": "string"},
+    },
+    ["points", "size", "diameter_mm"],
+)
+def hole_wizard(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    kind = str(args.get("kind", "hole"))
+    standard = str(args.get("standard", "iso"))
+    if kind not in HOLE_KINDS or standard not in HOLE_STANDARDS:
+        return result(False, f"Unknown kind '{kind}' or standard '{standard}'.")
+    if args.get("fastener_type_index") is not None:
+        fastener_index = int(args["fastener_type_index"])
+    else:
+        table = HOLE_FASTENERS.get(standard)
+        if table is None:
+            return result(False, f"Standard '{standard}' has no fastener table here; pass fastener_type_index.")
+        fastener = str(args.get("fastener") or HOLE_DEFAULT_FASTENER[kind])
+        if fastener not in table:
+            return result(False, f"Unknown fastener '{fastener}'. Choose from {sorted(table)}.")
+        fastener_index = table[fastener]
+    end_name = str(args.get("end_condition", "blind"))
+    if end_name == "blind" and args.get("depth_mm") is None:
+        return result(False, "end_condition=blind needs depth_mm.")
+    depth = to_m(args.get("depth_mm") or 0.0)
+    values = _hole_values(kind, args)
+
+    created: list[str] = []
+    feature: Any = None
+    for point in args["points"]:
+        clear_selection(doc)
+        coords = [to_m(point["x_mm"]), to_m(point["y_mm"]), to_m(point["z_mm"])]
+        if not select_at_point(doc, "FACE", coords, 0, False):
+            return result(False, f"No face at point {point}; hole not created.", created=created)
+        with dialogs_suppressed():
+            feature = feature_manager(doc).HoleWizard5(
+                HOLE_KINDS[kind], HOLE_STANDARDS[standard], fastener_index, str(args["size"]),
+                HOLE_END[end_name], to_m(args["diameter_mm"]), depth, depth,
+                *values,
+                str(args.get("thread_class", "")), bool(args.get("reverse", False)),
+                True, True, True, True, False,
+            )
+        if feature is None:
+            return feature_result(doc, None, "Hole Wizard hole", point=point, created=created)
+        if len(args["points"]) == 1:
+            rename_feature(feature, args.get("name"))
+        created.append(str(feature_property(feature, "Name", "")))
+    return feature_result(doc, feature, "Hole Wizard hole", kind=kind, standard=standard,
+                          size=args["size"], created=created)
+
+
+@tool(
+    "cosmetic_thread",
+    "Add a cosmetic thread to a circular edge (selection.edges=[i]). standard is the integer "
+    "thread-standard index the SOLIDWORKS UI uses; standard_type and size are the strings the UI "
+    "shows (e.g. 'Machine threads', 'M6x1'); diameter_mm is the thread diameter.",
+    {
+        "selection": SELECTION_SCHEMA,
+        "standard": {"type": "integer", "default": 0},
+        "standard_type": {"type": "string"},
+        "size": {"type": "string"},
+        "diameter_mm": {"type": "number", "exclusiveMinimum": 0},
+        "end_condition": {"type": "string", "enum": sorted(COSMETIC_END), "default": "blind"},
+        "depth_mm": {"type": "number", "default": 0},
+        "note": {"type": "string", "default": ""},
+        "name": {"type": "string"},
+    },
+    ["selection", "standard_type", "size", "diameter_mm"],
+)
+def cosmetic_thread(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    require_selection(doc, args["selection"])
+    with dialogs_suppressed():
+        feature = feature_manager(doc).InsertCosmeticThread3(
+            int(args.get("standard", 0)), str(args["standard_type"]), str(args["size"]),
+            to_m(args["diameter_mm"]), COSMETIC_END[str(args.get("end_condition", "blind"))],
+            to_m(args.get("depth_mm", 0.0)), str(args.get("note", "")),
+        )
+    rename_feature(feature, args.get("name"))
+    return feature_result(doc, feature, "cosmetic thread", size=args["size"])
+
+
+@tool(
+    "fillet_variant",
+    "Fillet types beyond the constant-radius edge fillet. variable: selection.edges plus "
+    "radius_mm (start) and end_radius_mm. face: face_set_1 and face_set_2 (selection specs with "
+    "faces) plus radius_mm. full_round: side_set_1, center and side_set_2 (one face each). "
+    "Variable and full-round are unverified on 2017 until probed live.",
+    {
+        "type": {"type": "string", "enum": ["variable", "face", "full_round"]},
+        "selection": SELECTION_SCHEMA,
+        "radius_mm": {"type": "number", "exclusiveMinimum": 0},
+        "end_radius_mm": {"type": "number", "exclusiveMinimum": 0},
+        "face_set_1": SELECTION_SCHEMA,
+        "face_set_2": SELECTION_SCHEMA,
+        "side_set_1": SELECTION_SCHEMA,
+        "center": SELECTION_SCHEMA,
+        "side_set_2": SELECTION_SCHEMA,
+        "propagate": {"type": "boolean", "default": True},
+        "name": {"type": "string"},
+    },
+    ["type"],
+)
+def fillet_variant(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    kind = str(args["type"])
+    radius = args.get("radius_mm")
+    options = FILLET_PROPAGATE if bool(args.get("propagate", True)) else 0
+    point_radii: Any = empty_variant()
+
+    if kind == "variable":
+        if radius is None or args.get("end_radius_mm") is None or not args.get("selection"):
+            return result(False, "type=variable needs selection (edges), radius_mm and end_radius_mm.")
+        require_selection(doc, args["selection"])
+        options |= FILLET_OPT_VARIABLE_RADIUS
+        ftype = FILLET_TYPE_VARIABLE
+        point_radii = double_array([to_m(radius), to_m(args["end_radius_mm"])])
+    elif kind == "face":
+        if radius is None or not (args.get("face_set_1") and args.get("face_set_2")):
+            return result(False, "type=face needs radius_mm, face_set_1 and face_set_2.")
+        require_selection(doc, args["face_set_1"], mark=FILLET_MARK_FACE_SET1)
+        require_selection(doc, args["face_set_2"], mark=FILLET_MARK_FACE_SET2, append=True)
+        options |= FILLET_UNIFORM_RADIUS
+        ftype = FILLET_TYPE_FACE
+    elif kind == "full_round":
+        if not (args.get("side_set_1") and args.get("center") and args.get("side_set_2")):
+            return result(False, "type=full_round needs side_set_1, center and side_set_2.")
+        require_selection(doc, args["side_set_1"], mark=FILLET_MARK_ROUND_SET1)
+        require_selection(doc, args["center"], mark=FILLET_MARK_ROUND_CENTER, append=True)
+        require_selection(doc, args["side_set_2"], mark=FILLET_MARK_ROUND_SET2, append=True)
+        options |= FILLET_UNIFORM_RADIUS
+        ftype = FILLET_TYPE_FULL_ROUND
+    else:
+        return result(False, f"Unknown fillet type '{kind}'.")
+
+    with dialogs_suppressed():
+        feature = feature_manager(doc).FeatureFillet3(
+            options, to_m(radius or 0.0), 0.0, 0.0, ftype, 0, 0,
+            empty_variant(), empty_variant(), empty_variant(),
+            empty_variant(), point_radii, empty_variant(), empty_variant(),
+        )
+    rename_feature(feature, args.get("name"))
+    return feature_result(doc, feature, f"{kind} fillet")
+
+
+@tool(
+    "chamfer_vertex",
+    "Chamfer the selected vertex (selection.vertices=[i]) with three distances along its edges. "
+    "distance_mm applies to all three unless distance2_mm/distance3_mm are given.",
+    {
+        "selection": SELECTION_SCHEMA,
+        "distance_mm": {"type": "number", "exclusiveMinimum": 0},
+        "distance2_mm": {"type": "number", "exclusiveMinimum": 0},
+        "distance3_mm": {"type": "number", "exclusiveMinimum": 0},
+        "name": {"type": "string"},
+    },
+    ["selection", "distance_mm"],
+)
+def chamfer_vertex(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    require_selection(doc, args["selection"])
+    d1 = to_m(args["distance_mm"])
+    d2 = to_m(args.get("distance2_mm", args["distance_mm"]))
+    d3 = to_m(args.get("distance3_mm", args["distance_mm"]))
+    with dialogs_suppressed():
+        feature = feature_manager(doc).InsertFeatureChamfer(0, CHAMFER_VERTEX, d1, 0.0, 0.0, d1, d2, d3)
+    rename_feature(feature, args.get("name"))
+    return feature_result(doc, feature, "vertex chamfer", distance_mm=args["distance_mm"])
