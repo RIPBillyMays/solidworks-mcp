@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modified for SOLIDWORKS 2017 support (fork).
 
 """Reference points and coordinate systems, multi-body operations (combine,
 split, move/copy, scale, mirror, delete, intersect) and a few shaping features
@@ -245,8 +246,11 @@ def combine_bodies(args: dict[str, Any]) -> dict[str, Any]:
     "split_body",
     "Split a body with a plane, surface or sketch given in tool_selection. All resulting bodies are "
     "kept unless consume_cut is true. Uses PreSplitBody2/PostSplitBody, whose return values are not "
-    "documented for 2017; on failure the answer says which step stopped.",
+    "documented for 2017; on failure the answer says which step stopped. method=\"cut\" is the 2017 "
+    "retry: tool_selection {\"sketches\": [closed profile]} is cut through all in both directions "
+    "(removes the profile volume, reported as kerf).",
     {
+        "method": {"type": "string", "enum": ["split", "cut"], "default": "split"},
         "tool_selection": SELECTION_SCHEMA,
         "consume_cut": {"type": "boolean", "default": False, "description": "Delete the cutting surface or sketch's body."},
         "name": {"type": "string"},
@@ -254,6 +258,14 @@ def combine_bodies(args: dict[str, Any]) -> dict[str, Any]:
     ["tool_selection"],
 )
 def split_body(args: dict[str, Any]) -> dict[str, Any]:
+    # Modified for SOLIDWORKS 2017 support (fork): PostSplitBody is a no-op, so offer a FeatureCut4 route.
+    method = str(args.get("method", "split"))
+    if method not in ("split", "cut"):
+        return result(False, f"Unknown method '{method}'. Choose split or cut.")
+    if method == "cut":
+        from .sw_edit import split_via_cut  # lazy: sw_edit imports sw_feature/sw_surface, like this module
+
+        return split_via_cut(args)
     _, doc = require_part()
     exit_active_sketch(doc)
     before = _feature_names(doc)

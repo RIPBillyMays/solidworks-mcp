@@ -96,7 +96,16 @@ To pause it without removing, use `/mcp` inside a session and disable the server
 
 JSON needs doubled backslashes in the path, as shown.
 
-**Watch out:** on 2026-10-09/10 the whole `mcpServers` key disappeared, probably because Desktop rewrote the file. It was re-added with `env` on 2026-10-10 (backup `.bak-2026-10-10b`). Check that it's still there after every restart.
+**Why the key kept disappearing (diagnosed 2026-10-11):** Desktop (MSIX install, `Claude_pzs8sxrjxfjjc`) holds this file in memory and rewrites the *whole* file on every session/connector change. `%LOCALAPPDATA%\Claude\Logs\main.log` shows `Config file written` several times a minute. Any edit made **while Desktop is running** is overwritten by its stale copy. (Desktop's logs moved from `%APPDATA%\Claude\logs` to `%LOCALAPPDATA%\Claude\Logs` in Sept 2026.) A key that is present **at startup** is kept on later writes; that's why T5a passed on 2026-10-08. There is no MSIX redirect (the package `LocalCache\Roaming` has no `Claude` folder) and no org policy involved. The only other config, `%APPDATA%\Claude-3p\`, is for third-party/enterprise mode and isn't used.
+
+**Supported fix:** edit only while Desktop is fully quit. Use the script, which refuses to run while Desktop is up, backs up the file, merges the entry and writes UTF-8 without a BOM:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\_Projects\solidworks-mcp\tools\compat\register_claude_desktop.ps1
+powershell -ExecutionPolicy Bypass -File C:\_Projects\solidworks-mcp\tools\compat\register_claude_desktop.ps1 -Check
+```
+
+Run it from a plain PowerShell window, not from a terminal inside Claude Desktop, because quitting Desktop kills that terminal.
 
 **Backup:** the file as it was before the original edit is saved next to it as `claude_desktop_config.json.bak-2026-10-08`. Restoring that copy removes the SOLIDWORKS entry, but also reverts any other change Desktop has made to the file since.
 
@@ -107,7 +116,7 @@ JSON needs doubled backslashes in the path, as shown.
 - Settings > Developer lists `solidworks` as running (no error badge).
 - In a new chat, the tools/connectors menu shows `solidworks` with its tools.
 - Ask: "Call solidworks_status and show me the raw result." With SOLIDWORKS closed you should get "No running SOLIDWORKS session is available." That counts as a pass.
-- If it fails to start, the MCP log is in `%APPDATA%\Claude\logs\` (look for `mcp-server-solidworks.log`).
+- If it fails to start, the MCP log is in `%LOCALAPPDATA%\Claude\Logs\` (look for `mcp-server-solidworks.log`).
 
 **Disable or remove:** delete the `solidworks` entry from `mcpServers` (keep the JSON valid: no trailing comma), then restart Desktop. Or restore the backup file as described above.
 

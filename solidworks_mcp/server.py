@@ -62,6 +62,12 @@ from . import sw_docdata  # noqa: F401
 from . import sw_inspect  # noqa: F401
 from . import sw_assembly  # noqa: F401
 from . import sw_drawing  # noqa: F401
+from . import sw_mates_adv  # noqa: F401
+from . import sw_asm_pattern  # noqa: F401
+from . import sw_sheetmetal  # noqa: F401
+from . import sw_thread  # noqa: F401
+from . import sw_surface  # noqa: F401
+from . import sw_edit  # noqa: F401
 from . import sw_demo  # noqa: F401
 from .sw2017_fences import apply_fences
 

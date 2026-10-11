@@ -327,7 +327,7 @@ def flag_methods(obj: Any, *names: str) -> Any:
         except Exception:
             # Deliberately not logging the object: repr() on a COM proxy can
             # itself dispatch, and this runs on the failure path.
-            if name in _DOCUMENT_SPECIFIC_METHODS:
+            if name in _DOCUMENT_SPECIFIC_METHODS or name in _registered(*_DOC_INTERFACES):
                 logger.debug("'%s' is not exposed by this object, as expected.", name)
             elif name not in _UNFLAGGABLE_NAMES:
                 _UNFLAGGABLE_NAMES.add(name)
@@ -385,16 +385,49 @@ _MODEL_DOC_METHODS = (
 _APP_METHODS = ("NewDocument", "OpenDoc6", "ActivateDoc3", "CloseDoc", "GetUserPreferenceStringValue")
 
 
+# Per-module additions to the lists above (ADR-0007).  Fork modules declare the
+# members they call with arguments at import time, so parallel work never edits
+# the shared tuples.  Keyed by the interface the member lives on.
+_REGISTERED_FLAGS: dict[str, list[str]] = {}
+_DOC_INTERFACES = ("IModelDoc2", "IPartDoc", "IAssemblyDoc", "IDrawingDoc")
+
+
+def register_flag_methods(interface: str, names: Iterable[str]) -> None:
+    """Declare member names of ``interface`` that must be flagged as methods.
+
+    Idempotent and order-preserving; the built-in tuples are never modified.
+    ``interface`` is one of ISketchManager, IFeatureManager, IModelDocExtension
+    or a document interface (IModelDoc2/IPartDoc/IAssemblyDoc/IDrawingDoc);
+    document-interface names are offered to every document, like
+    ``_MODEL_DOC_METHODS``, and their absence on other document types is quiet.
+    """
+    if isinstance(names, str):
+        names = (names,)
+    bucket = _REGISTERED_FLAGS.setdefault(interface, [])
+    for name in names:
+        if name not in bucket:
+            bucket.append(name)
+
+
+def _registered(*interfaces: str) -> tuple[str, ...]:
+    out: list[str] = []
+    for interface in interfaces:
+        for name in _REGISTERED_FLAGS.get(interface, ()):
+            if name not in out:
+                out.append(name)
+    return tuple(out)
+
+
 def sketch_manager(doc: Any) -> Any:
-    return flag_methods(doc.SketchManager, *_SKETCH_MANAGER_METHODS)
+    return flag_methods(doc.SketchManager, *_SKETCH_MANAGER_METHODS, *_registered("ISketchManager"))
 
 
 def feature_manager(doc: Any) -> Any:
-    return flag_methods(doc.FeatureManager, *_FEATURE_MANAGER_METHODS)
+    return flag_methods(doc.FeatureManager, *_FEATURE_MANAGER_METHODS, *_registered("IFeatureManager"))
 
 
 def extension(doc: Any) -> Any:
-    return flag_methods(doc.Extension, *_EXTENSION_METHODS)
+    return flag_methods(doc.Extension, *_EXTENSION_METHODS, *_registered("IModelDocExtension"))
 
 
 def selectable(obj: Any) -> Any:
@@ -550,12 +583,53 @@ def dialogs_suppressed(app: Any = None, toggles: Sequence[int] = FEATURE_DIALOG_
                 logger.info("Could not restore SOLIDWORKS dialog toggle %s.", toggle)
 
 
+@contextmanager
+def feature_data(feature: Any, doc: Any) -> Iterator[Any]:
+    """Guarded feature-definition edit (ADR-0007 decision 4).
+
+    ``GetDefinition`` -> ``AccessSelections(doc, None)`` -> yield the data for
+    the caller to edit -> ``ModifyDefinition(data, doc, None)`` on a normal exit.
+    ``ReleaseSelectionAccess`` always runs once access was taken, even when the
+    caller raised (ModifyDefinition is then skipped), because leaving a feature
+    in selection-access state hangs SOLIDWORKS like a modal.  Raises
+    RuntimeError if there is no definition, access is refused, or
+    ModifyDefinition reports failure.  The caller must still verify by
+    read-back: ModifyDefinition can return True and change nothing.
+    """
+    data = value(feature, "GetDefinition")  # PROPGET on 2017: calling it raises Member not found
+    if data is None:
+        raise RuntimeError("Feature has no editable definition.")
+    accessed = False
+    try:
+        try:
+            accessed = bool(data.AccessSelections(doc, nothing()))
+        except Exception:
+            # The call may have half-taken access before failing; release defensively.
+            _release_selection_access(data)
+            raise
+        if not accessed:
+            raise RuntimeError("SOLIDWORKS refused selection access for this feature.")
+        yield data
+        if not feature.ModifyDefinition(data, doc, nothing()):
+            raise RuntimeError("ModifyDefinition reported failure.")
+    finally:
+        if accessed:
+            _release_selection_access(data)
+
+
+def _release_selection_access(data: Any) -> None:
+    try:
+        data.ReleaseSelectionAccess()
+    except Exception:
+        logger.warning("ReleaseSelectionAccess failed; the feature may be left in edit state.")
+
+
 def active_document() -> tuple[Any, Any]:
     app = running_app()
     doc = app.ActiveDoc
     if doc is None:
         raise RuntimeError("SOLIDWORKS has no active document. Create or open a part/assembly first.")
-    return app, flag_methods(doc, *_MODEL_DOC_METHODS)
+    return app, flag_methods(doc, *_MODEL_DOC_METHODS, *_registered(*_DOC_INTERFACES))
 
 
 def document_type(doc: Any) -> int:

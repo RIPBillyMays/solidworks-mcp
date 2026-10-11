@@ -57,6 +57,28 @@ FENCES: dict[str, str] = {
     ),
 }
 
+FENCES["sheet_metal_sketched_bend"] = (
+    "IFeatureManager.CreateDefinition(swFmSketchBend) returns Nothing on 2017 (verified live), so no "
+    "sketched-bend definition can be built; use sheet_metal_edge_flange or fold/unfold instead"
+)
+
+FENCES["surface_trim"] = (
+    "IFeatureManager.PreTrimSurface succeeds but PostTrimSurface returns Nothing and trims nothing for "
+    "every mark combination and argument form tried (verified live); use surface_knit or cut the "
+    "thickened body instead"
+)
+
+FENCES["linear_component_pattern"] = (
+    "IFeatureManager.FeatureLinearPattern5 in an assembly returns Nothing and creates no pattern for "
+    "every mark and argument form tried, with the selection read back correct (verified live); use "
+    "pattern_driven_component_pattern or insert_component repeatedly instead"
+)
+FENCES["circular_component_pattern"] = (
+    "IFeatureManager.FeatureCircularPattern5 in an assembly returns Nothing and creates no pattern for "
+    "every mark value tried, with the selection read back correct (verified live); use "
+    "pattern_driven_component_pattern or insert_component + rotate_component instead"
+)
+
 PREFIX = "NOT SUPPORTED ON SOLIDWORKS 2017: "
 
 

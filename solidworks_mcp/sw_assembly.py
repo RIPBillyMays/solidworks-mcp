@@ -36,6 +36,7 @@ from .sw_core import (
     component_bodies,
     component_transform,
     document_info,
+    dialogs_suppressed,
     double_array,
     empty_variant,
     extension,
@@ -62,6 +63,7 @@ from .sw_core import (
     tool,
     value,
 )
+from .sw_mates_adv import ADV_MATE_TYPES, UNSUPPORTED_MATE_TYPES, assign_marks, plan_advanced_mate
 
 
 ADD_MATE_ERRORS = {
@@ -152,7 +154,8 @@ def feature_dimensions(feature: Any) -> list[dict[str, Any]]:
 
 def _mate_entry(feature: Any) -> dict[str, Any]:
     """Describe one mate feature; shared by list_mates, edit_mate and add_mate."""
-    reverse_types = {v: k for k, v in MATE_TYPES.items()}
+    # Advanced types read back by name too (the limit_* names are aliases of distance/angle, so skipped).
+    reverse_types = {v: k for k, v in {**MATE_TYPES, **{k: v for k, v in ADV_MATE_TYPES.items() if not k.startswith('limit_')}}.items()}
     reverse_align = {v: k for k, v in MATE_ALIGNMENTS.items()}
     entry: dict[str, Any] = {
         "name": str(feature_property(feature, "Name", "")),
@@ -524,6 +527,10 @@ ENTITY_SCHEMA = {
                 "required": ["x_mm", "y_mm", "z_mm"],
             },
             "mark": {"type": "integer", "default": 0},
+            "role": {
+                "type": "string",
+                "description": "cam: cam|follower; hinge: concentric|coincident; path: point|path; symmetric: symmetry_plane|entity. Sets the selection mark.",
+            },
         },
     },
 }
@@ -534,9 +541,15 @@ ENTITY_SCHEMA = {
     "Mate entities in the active assembly. Pick them with a raw selection spec and/or entities "
     "(component + face/edge/vertex index or plane name), then name the mate type. "
     "Distance is millimetres, angle is degrees. Supports limit distance/angle mates "
-    "(min/max values) and width mates (width_option).",
+    "(min/max values; limit_distance / limit_angle insist on both), width mates (width_option, "
+    "width_percent) and the advanced types gear (ratio_num/ratio_den/reverse), rack_pinion "
+    "(distance_per_rev_mm), screw (pitch_mm), cam, hinge and path (entities may carry a 'role'), "
+    "slot (slot_constraint free|center|distance|percent) and symmetric. Note: gear and screw mates build "
+    "(types 10 and 17) but their motion coupling (ratio, direction, pitch) could not be verified through "
+    "the 2017 API (live C1). The result reports the "
+    "mate and feature counts before/after and the mate type SOLIDWORKS actually built.",
     {
-        "mate_type": {"type": "string", "enum": sorted(MATE_TYPES)},
+        "mate_type": {"type": "string", "enum": sorted({*MATE_TYPES, *ADV_MATE_TYPES})},
         "selection": SELECTION_SCHEMA,
         "entities": ENTITY_SCHEMA,
         "alignment": {"type": "string", "enum": sorted(MATE_ALIGNMENTS), "default": "closest"},
@@ -549,6 +562,14 @@ ENTITY_SCHEMA = {
         "width_option": {"type": "string", "enum": ["centered", "dimension", "free", "percent"], "default": "centered", "description": "Used by mate_type=width."},
         "flip": {"type": "boolean", "default": False},
         "lock_rotation": {"type": "boolean", "default": False},
+        "ratio_num": {"type": "number", "exclusiveMinimum": 0, "description": "mate_type=gear: numerator of the ratio."},
+        "ratio_den": {"type": "number", "exclusiveMinimum": 0, "description": "mate_type=gear: denominator of the ratio."},
+        "reverse": {"type": "boolean", "description": "Gear/rack_pinion/screw: opposite direction of rotation."},
+        "distance_per_rev_mm": {"type": "number", "exclusiveMinimum": 0, "description": "mate_type=rack_pinion."},
+        "pitch_mm": {"type": "number", "exclusiveMinimum": 0, "description": "mate_type=screw."},
+        "slot_constraint": {"type": "string", "enum": ["free", "center", "distance", "percent"], "description": "mate_type=slot."},
+        "slot_percent": {"type": "number", "minimum": 0, "maximum": 100, "description": "slot_constraint=percent."},
+        "width_percent": {"type": "number", "minimum": 0, "maximum": 100, "description": "width_option=percent."},
     },
     ["mate_type"],
 )
@@ -556,11 +577,22 @@ def add_mate(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = require_assembly()
     if not args.get("selection") and not args.get("entities"):
         return result(False, "Pass selection or entities to say what to mate.")
+    refused = UNSUPPORTED_MATE_TYPES.get(str(args["mate_type"]))
+    if refused:
+        return result(False, f"Not supported on SOLIDWORKS 2017: {refused}", fenced=True)
+    # Advanced mate types (Batch C): validate and map every argument before COM is touched.
+    try:
+        plan = plan_advanced_mate(args)
+        plan_marks = assign_marks(plan, list(args.get("entities") or [])) if plan else None
+    except ValueError as exc:
+        return result(False, str(exc))
     count = 0
     picked: list[str] = []
     if args.get("selection"):
         count += require_selection(doc, args["selection"])
-    for spec in args.get("entities") or []:
+    for position, spec in enumerate(args.get("entities") or []):
+        if plan_marks and plan_marks[position]:
+            spec = {**spec, "mark": plan_marks[position]}
         if str(args["mate_type"]) == "width" and int(spec.get("mark", 0)) == 2:
             # Live-verified on 2017 SP5: AddMate5 refuses a width mate unless the tab faces carry
             # selection mark 16 (marks 2, 4, 8 fail with no status); the width faces use mark 1.
@@ -571,10 +603,15 @@ def add_mate(args: dict[str, Any]) -> dict[str, Any]:
             clear_selection(doc)
             return result(False, str(exc))
         count += 1
-    mate_type = MATE_TYPES[str(args["mate_type"])]
+    if plan and count < plan.min_entities:
+        clear_selection(doc)
+        return result(False, f"A {args['mate_type']} mate needs at least {plan.min_entities} entities; {count} were selected.")
+    mate_type = plan.mate_type if plan else MATE_TYPES[str(args["mate_type"])]
     alignment = MATE_ALIGNMENTS[str(args.get("alignment", "closest"))]
     # swMateWidth_e: 0 centered, 1 free, 2 dimension, 3 percent
     width_option = {"centered": 0, "free": 1, "dimension": 2, "percent": 3}[str(args.get("width_option", "centered"))]
+    if plan and plan.width_option is not None:
+        width_option = plan.width_option
     status = byref_long(0)
 
     distance = args.get("distance_mm", 0)
@@ -590,13 +627,21 @@ def add_mate(args: dict[str, Any]) -> dict[str, Any]:
         return result(False, "min limit must not exceed max limit.")
 
     before = {str(feature_property(f, "Name", "")) for f in mate_features(doc)}
-    mate = doc.AddMate5(
-        mate_type, alignment, bool(args.get("flip", False)),
-        to_m(distance), to_m(upper_d), to_m(lower_d),
-        1.0, 1.0,
-        to_rad(angle), to_rad(upper_a), to_rad(lower_a),
-        False, bool(args.get("lock_rotation", False)), width_option, status,
-    )
+    tree_before = len(iter_feature_objects(doc)) if plan else 0
+    if plan:
+        plan.width_option = width_option
+        mate_args = plan.addmate5_args(alignment, status)
+    else:
+        mate_args = (
+            mate_type, alignment, bool(args.get("flip", False)),
+            to_m(distance), to_m(upper_d), to_m(lower_d),
+            1.0, 1.0,
+            to_rad(angle), to_rad(upper_a), to_rad(lower_a),
+            False, bool(args.get("lock_rotation", False)), width_option, status,
+        )
+    with dialogs_suppressed():
+        # Hinge/path/cam/slot/gear mates can open a PropertyManager or a modal that blocks COM forever.
+        mate = doc.AddMate5(*mate_args)
     code = int(status.value)
     clear_selection(doc)
     rebuild(doc)
@@ -611,6 +656,38 @@ def add_mate(args: dict[str, Any]) -> dict[str, Any]:
     created = [f for f in mate_features(doc) if str(feature_property(f, "Name", "")) not in before]
     info = _mate_entry(created[-1]) if created else {}
     extra: dict[str, Any] = {"mate": info.get("name", ""), "entities": count}
+    if plan:
+        built = safe(mate, "Type")
+        mates_after = len(mate_features(doc))
+        extra.update(
+            requested_type=plan.mate_type,
+            built_type=None if built is None else int(built),
+            mate_count_before=len(before),
+            mate_count_after=mates_after,
+            feature_count_before=tree_before,
+            feature_count_after=len(iter_feature_objects(doc)),
+            live_probe=plan.probes,
+        )
+        if mates_after <= len(before):
+            # The measured mate count decides, not the AddMate5 return value (ADR global rule 3).
+            return result(
+                False,
+                f"AddMate5 returned a mate but the mate count did not grow ({len(before)} -> {mates_after}); "
+                "treat it as a silent no-op.",
+                status=code,
+                **extra,
+            )
+        if built is None:
+            extra["type_unverified"] = True
+        elif int(built) != plan.mate_type:
+            # Success is the measured type, not the return value (ADR global rule 3).
+            return result(
+                False,
+                f"SOLIDWORKS built a type-{int(built)} mate, not the requested {args['mate_type']} "
+                f"(type {plan.mate_type}); delete_mate it and re-check the selection marks.",
+                status=code,
+                **extra,
+            )
     if picked:
         extra["picked"] = picked
     if info.get("dimensions"):

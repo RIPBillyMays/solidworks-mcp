@@ -24,7 +24,8 @@ selection set or about which mark a given API expects.
 from __future__ import annotations
 
 import math
-from typing import Any, Final
+import re
+from typing import Any, Final, Sequence
 
 from .sw_core import (
     active_document,
@@ -35,10 +36,13 @@ from .sw_core import (
     CHAMFER_EQUAL_DISTANCE,
     CHAMFER_TANGENT_PROPAGATION,
     as_list,
+    byref_long,
     clear_selection,
     dialogs_suppressed,
+    dispatch_array,
     double_array,
     empty_variant,
+    enumerate_edges,
     END_CONDITIONS,
     exit_active_sketch,
     extension,
@@ -50,6 +54,7 @@ from .sw_core import (
     FILLET_UNIFORM_RADIUS,
     find_feature,
     get_bodies,
+    iter_face_objects,
     iter_features,
     iter_feature_objects,
     logger,
@@ -1146,8 +1151,17 @@ FILLET_MARK_FACE_SET2: Final = 4
 FILLET_MARK_ROUND_SET1: Final = 3
 FILLET_MARK_ROUND_CENTER: Final = 4
 FILLET_MARK_ROUND_SET2: Final = 5
+# swFeatureNameID_e.swFmFillet: CreateDefinition type for the full-round route (Batch C2)
+FM_FILLET: Final = 1
 # swChamferType_e
 CHAMFER_VERTEX: Final = 3
+# Cosmetic thread added by hole_wizard(cosmetic_thread=True): swThreadStandard 2 = ISO, 'Machine threads'
+HOLE_COSMETIC_STANDARD: Final = 2
+HOLE_COSMETIC_STANDARD_TYPE: Final = "Machine threads"
+# Edge-match tolerances when finding the hole's opening edge (mm / fraction of radius)
+# LIVE (C2): the wizard centres the hole up to ~0.1 mm from the picked point on 2017.
+HOLE_EDGE_CENTER_TOL_MM: Final = 0.5
+HOLE_EDGE_RADIUS_TOL: Final = 0.25
 # swCosmeticThreadType_e
 COSMETIC_END: Final = {"blind": 0, "up_to_next": 1, "through": 2}
 
@@ -1183,6 +1197,34 @@ def _hole_values(kind: str, args: dict[str, Any]) -> list[float]:
     return values
 
 
+_METRIC_SIZE = re.compile(r"^\s*M(\d+(?:\.\d+)?)\s*(?:[xX]\s*(\d+(?:\.\d+)?))?\s*$")
+
+
+def _metric_thread(size: str) -> tuple[float, str] | None:
+    """(nominal diameter mm, 'M6x1.0' style size string) for an ISO metric wizard size, else None."""
+    match = _METRIC_SIZE.match(size)
+    if not match or match.group(2) is None:
+        return None
+    diameter = float(match.group(1))
+    pitch = float(match.group(2))
+    return diameter, f"M{match.group(1)}x{pitch:g}" + (".0" if float(pitch).is_integer() else "")
+
+
+def _hole_opening_edge(doc: Any, point_mm: Sequence[float], diameter_mm: float) -> int | None:
+    """Index of the circular edge centred on the hole point whose radius best matches the hole."""
+    best: tuple[float, int] | None = None
+    for edge in enumerate_edges(doc):
+        if edge.get("curve_type") != "circle" or "center_mm" not in edge:
+            continue
+        centre = edge["center_mm"]
+        if math.dist(centre, point_mm) > HOLE_EDGE_CENTER_TOL_MM:
+            continue
+        error = abs(edge["radius_mm"] - diameter_mm / 2.0) / (diameter_mm / 2.0)
+        if error <= HOLE_EDGE_RADIUS_TOL and (best is None or error < best[0]):
+            best = (error, int(edge["index"]))
+    return None if best is None else best[1]
+
+
 @tool(
     "hole_wizard",
     "Insert a Hole Wizard hole (counterbore, countersink, straight hole, tapped hole) on a planar "
@@ -1193,7 +1235,9 @@ def _hole_values(kind: str, args: dict[str, Any]) -> list[float]:
     "fastener_type_index). size is the wizard size string such as 'M6x1'. diameter_mm is the hole "
     "(or tap drill) diameter. Value1/2 mapping is verified on 2017 (cbore/csink); raw_values_mm overrides. "
     "Tapped sizes are the wizard strings ('M6x1.0', '1/4-20'). The wizard adds no cosmetic thread through the "
-    "API (IWizardHoleFeatureData2.CosmeticThreadType is read-only): call cosmetic_thread on the hole edge.",
+    "API (IWizardHoleFeatureData2.CosmeticThreadType is read-only): pass cosmetic_thread=true (tap holes with a "
+    "metric size such as 'M6x1') to add an ISO cosmetic thread on each hole's opening edge afterwards, or call "
+    "cosmetic_thread yourself.",
     {
         "kind": {"type": "string", "enum": sorted(HOLE_KINDS), "default": "hole"},
         "standard": {"type": "string", "enum": sorted(HOLE_STANDARDS), "default": "iso"},
@@ -1218,6 +1262,7 @@ def _hole_values(kind: str, args: dict[str, Any]) -> list[float]:
         "csink_angle_deg": {"type": "number", "default": 90},
         "thread_depth_mm": {"type": "number"},
         "thread_class": {"type": "string", "default": ""},
+        "cosmetic_thread": {"type": "boolean", "default": False, "description": "Tap holes only: add an ISO cosmetic thread to each hole."},
         "reverse": {"type": "boolean", "default": False},
         "raw_values_mm": {"type": "array", "items": {"type": "number"}, "maxItems": 12},
         "name": {"type": "string"},
@@ -1246,8 +1291,17 @@ def hole_wizard(args: dict[str, Any]) -> dict[str, Any]:
         return result(False, "end_condition=blind needs depth_mm.")
     depth = to_m(args.get("depth_mm") or 0.0)
     values = _hole_values(kind, args)
+    thread_spec: tuple[float, str] | None = None
+    if bool(args.get("cosmetic_thread", False)):
+        if kind not in ("tap", "pipe_tap"):
+            return result(False, "cosmetic_thread=true only applies to kind=tap or pipe_tap.")
+        thread_spec = _metric_thread(str(args["size"]))
+        if thread_spec is None:
+            return result(False, "cosmetic_thread needs an ISO metric size such as 'M6x1' (diameter and pitch); "
+                          "call cosmetic_thread on the hole edge for other sizes.")
 
     created: list[str] = []
+    cosmetic: list[dict[str, Any]] = []
     feature: Any = None
     for point in args["points"]:
         clear_selection(doc)
@@ -1267,8 +1321,65 @@ def hole_wizard(args: dict[str, Any]) -> dict[str, Any]:
         if len(args["points"]) == 1:
             rename_feature(feature, args.get("name"))
         created.append(str(feature_property(feature, "Name", "")))
-    return feature_result(doc, feature, "Hole Wizard hole", kind=kind, standard=standard,
-                          size=args["size"], created=created)
+        if thread_spec is not None:
+            cosmetic.append(_add_hole_cosmetic_thread(
+                doc, point, float(args["diameter_mm"]), thread_spec,
+                args.get("thread_depth_mm") or args.get("depth_mm") or 0.0,
+            ))
+    out = feature_result(doc, feature, "Hole Wizard hole", kind=kind, standard=standard,
+                         size=args["size"], created=created)
+    if thread_spec is not None:
+        out.setdefault("data", {})["cosmetic_threads"] = cosmetic
+        failed = [c for c in cosmetic if not c.get("ok")]
+        out["data"]["cosmetic_thread_verified"] = not failed
+        hard = [c for c in failed if not c.get("unverified")]
+        if hard and out["ok"]:
+            out["ok"] = False
+            out["message"] += f" {len(hard)} cosmetic thread(s) were not added: {hard[0].get('reason')}"
+        elif failed:
+            # The hole is real (measured by feature_result); only the thread claim is withheld.
+            out["data"]["warning"] = f"{len(failed)} cosmetic thread(s) not verified: {failed[0].get('reason')}"
+            out["message"] += f" Warning: {len(failed)} cosmetic thread(s) not verified: {failed[0].get('reason')}"
+    return out
+
+
+def _add_hole_cosmetic_thread(
+    doc: Any, point: dict[str, Any], hole_diameter_mm: float, spec: tuple[float, str], depth_mm: float
+) -> dict[str, Any]:
+    """InsertCosmeticThread3 on the hole's opening edge; verified by reading the thread back."""
+    nominal, size = spec
+    centre = [float(point["x_mm"]), float(point["y_mm"]), float(point["z_mm"])]
+    index = _hole_opening_edge(doc, centre, hole_diameter_mm)
+    if index is None:
+        return {"ok": False, "reason": f"no circular edge found at {centre} for a {hole_diameter_mm} mm hole"}
+    clear_selection(doc)
+    require_selection(doc, {"edges": [index]})
+    with dialogs_suppressed():
+        thread = feature_manager(doc).InsertCosmeticThread3(
+            HOLE_COSMETIC_STANDARD, HOLE_COSMETIC_STANDARD_TYPE, size, to_m(nominal),
+            COSMETIC_END["blind"], to_m(depth_mm), "",
+        )
+    if thread is None:
+        return {"ok": False, "reason": "InsertCosmeticThread3 returned no feature", "edge": index}
+    entry: dict[str, Any] = {"ok": True, "name": str(feature_property(thread, "Name", "")), "size": size, "edge": index}
+    # Read back: unknown standard strings silently fall back to '2-4.5'.
+    definition = safe(thread, "GetDefinition")
+    if definition is None:
+        # The hole itself may be fine; only the cosmetic thread is unverified.
+        entry["ok"] = False
+        entry["cosmetic_thread_verified"] = False
+        entry["unverified"] = True
+        entry["warning"] = "cosmetic thread added but could not be read back (GetDefinition returned nothing)"
+        entry["reason"] = entry["warning"]
+    else:
+        entry["cosmetic_thread_verified"] = True
+        entry["size_readback"] = safe(definition, "Size")
+        entry["diameter_readback_mm"] = round(float(safe(definition, "Diameter", 0.0) or 0.0) * 1000.0, 4)
+        if entry["size_readback"] != size or abs(entry["diameter_readback_mm"] - nominal) > 0.01:
+            entry["ok"] = False
+            entry["cosmetic_thread_verified"] = False
+            entry["reason"] = "cosmetic thread read back as a different size (standard string fell back)"
+    return entry
 
 
 @tool(
@@ -1308,7 +1419,8 @@ def cosmetic_thread(args: dict[str, Any]) -> dict[str, Any]:
     "fillet_variant",
     "Fillet types beyond the constant-radius edge fillet. variable: selection.edges plus "
     "radius_mm (start) and end_radius_mm. face: face_set_1 and face_set_2 (selection specs with "
-    "faces) plus radius_mm. full_round is not supported on 2017 and is refused.",
+    "faces) plus radius_mm. full_round is NOT SUPPORTED ON SOLIDWORKS 2017 and is "
+    "refused (FeatureFillet3 builds a plain fillet; CreateDefinition(1) returns Nothing).",
     {
         "type": {"type": "string", "enum": ["variable", "face", "full_round"]},
         "selection": SELECTION_SCHEMA,
@@ -1351,10 +1463,10 @@ def fillet_variant(args: dict[str, Any]) -> dict[str, Any]:
     elif kind == "full_round":
         # Live 2017: FeatureFillet3 with type 3 never builds a full-round fillet; whatever the marks
         # (1/2/4, 3/4/5, 2/4/1), options (0..16384) or radius, it makes one plain edge fillet of
-        # radius_mm instead.  Refused rather than returning the wrong geometry.
-        return result(False, "Not supported on SOLIDWORKS 2017: full_round fillets are not built by FeatureFillet3 "
-                      "(it makes a single constant-radius edge fillet); fillet each edge with the fillet tool instead.",
-                      fenced=True)
+        # radius_mm instead.  Live C2: CreateDefinition(1) returns Nothing and IFeature Type is
+        # read-only, so the per-type refusal stands (a whole-tool fence would also block variable/face).
+        return result(False, "Not supported on SOLIDWORKS 2017: full_round fillets have no working API "
+                      "route; use a face fillet or a revolve/sweep instead", fenced=True)
     else:
         return result(False, f"Unknown fillet type '{kind}'.")
 
@@ -1366,6 +1478,70 @@ def fillet_variant(args: dict[str, Any]) -> dict[str, Any]:
         )
     rename_feature(feature, args.get("name"))
     return feature_result(doc, feature, f"{kind} fillet")
+
+
+def _volume_mm3(doc: Any) -> float | None:
+    try:
+        values = extension(doc).GetMassProperties2(2, byref_long(0), False)
+        return round(float(values[3]) * 1e9, 4) if values is not None and len(values) >= 6 else None
+    except Exception:
+        return None
+
+
+def _full_round_fillet(doc: Any, args: dict[str, Any]) -> dict[str, Any]:
+    """Full-round fillet through CreateDefinition(swFmFillet) + ISimpleFilletFeatureData2.
+
+    Success is measured: the part volume must drop (a full round removes the corner material;
+    a silent no-op leaves it unchanged).  Face counts before/after are returned for the caller.  Any failure of the route is
+    reported as a refusal (fenced=True) rather than returning wrong geometry.
+    """
+    sets = {
+        FILLET_MARK_ROUND_SET1: args.get("side_set_1"),
+        FILLET_MARK_ROUND_CENTER: args.get("center"),
+        FILLET_MARK_ROUND_SET2: args.get("side_set_2"),
+    }
+    if not all(spec and spec.get("faces") for spec in sets.values()):
+        return result(False, "type=full_round needs side_set_1, center and side_set_2, each with faces.")
+    try:
+        faces = iter_face_objects(doc)
+        picked: dict[int, list[Any]] = {}
+        for which, spec in sets.items():
+            indices = [int(i) for i in spec["faces"]]
+            bad = [i for i in indices if not 0 <= i < len(faces)]
+            if bad:
+                return result(False, f"Face index {bad[0]} is out of range (0..{len(faces) - 1}).")
+            picked[which] = [faces[i][0] for i in indices]
+        faces_before = len(faces)
+        features_before = len(iter_feature_objects(doc))
+        volume_before = _volume_mm3(doc)
+        clear_selection(doc)
+        with dialogs_suppressed():
+            manager = feature_manager(doc)
+            data = manager.CreateDefinition(FM_FILLET)
+            if data is None:  # LIVE (C2): 2017 returns None for swFmFillet (and for most types except base flange)
+                raise RuntimeError("CreateDefinition(swFmFillet) returned None")
+            data.Type = FILLET_TYPE_FULL_ROUND
+            for which, objs in picked.items():
+                data.SetFaces(which, dispatch_array(objs))
+            feature = manager.CreateFeature(data)
+    except Exception as exc:
+        return result(False, "Full-round fillet could not be built on SOLIDWORKS 2017 (FeatureFillet3 only makes "
+                      f"a plain edge fillet and the CreateDefinition route failed): {exc}", fenced=True)
+    rename_feature(feature, args.get("name"))
+    out = feature_result(doc, feature, "full_round fillet")
+    faces_after = len(iter_face_objects(doc))
+    volume_after = _volume_mm3(doc)
+    out.setdefault("data", {}).update(
+        faces_before=faces_before, faces_after=faces_after,
+        volume_before_mm3=volume_before, volume_after_mm3=volume_after,
+        features_before=features_before, features_after=len(iter_feature_objects(doc)),
+    )
+    if feature is not None and out["ok"] and not (
+        volume_before is not None and volume_after is not None and volume_after < volume_before - 1e-6
+    ):
+        out["ok"] = False
+        out["message"] = "CreateFeature returned a fillet but the volume did not drop; no full round was built."
+    return out
 
 
 @tool(
