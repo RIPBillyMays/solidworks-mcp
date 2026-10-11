@@ -30,12 +30,13 @@ def _tool(name: str, description: str = "does a thing") -> Tool:
 
 class FenceTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tools = [_tool("auto_dimension_view", "Auto-dimension a view."), _tool("redo"), _tool("set_mass_override"), _tool("combine_bodies"), _tool("other")]
+        self.tools = [_tool("auto_dimension_view", "Auto-dimension a view."), _tool("redo"), _tool("set_mass_override"), _tool("combine_bodies"), _tool("split_body"), _tool("other")]
         self.handlers: dict[str, Any] = {
             "auto_dimension_view": lambda a: sw_core.result(True, "should never run"),
             "redo": lambda a: sw_core.result(True, "should never run"),
             "set_mass_override": lambda a: sw_core.result(True, "should never run"),
             "combine_bodies": lambda a: sw_core.result(True, "should never run"),
+            "split_body": lambda a: sw_core.result(True, "should never run"),
             "other": lambda a: sw_core.result(True, "fine"),
         }
         self.env = unittest.mock.patch.dict(os.environ)

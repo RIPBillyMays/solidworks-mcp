@@ -41,6 +41,11 @@ FENCES: dict[str, str] = {
         "overlapping or touching bodies); use boss_extrude/cut_extrude with merge=true, or a "
         "multi-body feature option, instead"
     ),
+    "split_body": (
+        "IFeatureManager.PreSplitBody2 returns the two resulting temporary bodies, but PostSplitBody "
+        "creates no feature for any combination of consume flag, body subset, Origins or SavePaths "
+        "(verified live); cut the body with cut_extrude or a plane-aligned sketch instead"
+    ),
     "set_mass_override": (
         "IMassProperty.OverrideMass only sets UserAssigned; Mass is unchanged on the same and on a "
         "fresh calculation object (verified live), and 2017 has no density setter; set the material "

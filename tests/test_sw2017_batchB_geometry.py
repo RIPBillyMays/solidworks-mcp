@@ -167,7 +167,8 @@ class ConstantTests(unittest.TestCase):
         self.assertEqual(f.FILLET_TYPE_FULL_ROUND, ev("swFeatureFilletType_e.swFeatureFilletType_FullRound"))
         self.assertEqual(f.FILLET_OPT_VARIABLE_RADIUS, ev("swFeatureFilletOptions_e.swFeatureFilletVarRadiusType"))
         self.assertEqual(f.FILLET_MARK_FACE_SET1, ev("swSimpleFilletWhichFaces_e.swFaceFilletSet1"))
-        self.assertEqual(f.FILLET_MARK_FACE_SET2, ev("swSimpleFilletWhichFaces_e.swFaceFilletSet2"))
+        # live 2017: set 2 needs mark 4 (the enum says 2, which builds nothing)
+        self.assertEqual(f.FILLET_MARK_FACE_SET2, 4)
         self.assertEqual(f.FILLET_MARK_ROUND_SET1, ev("swSimpleFilletWhichFaces_e.swFullRoundFilletSet1"))
         self.assertEqual(f.FILLET_MARK_ROUND_CENTER, ev("swSimpleFilletWhichFaces_e.swFullRoundFilletCenterSet"))
         self.assertEqual(f.FILLET_MARK_ROUND_SET2, ev("swSimpleFilletWhichFaces_e.swFullRoundFilletSet2"))
@@ -251,7 +252,7 @@ class HoleWizardTests(unittest.TestCase):
             sw_feature.hole_wizard(self.base(kind="tap", standard="iso", thread_depth_mm=8, end_condition="through_all", depth_mm=None))
         a = fm.last("HoleWizard5")
         self.assertEqual((a[0], a[1], a[2], a[4]), (4, 8, 147, 1))
-        self.assertAlmostEqual(a[10], 0.008)
+        self.assertAlmostEqual(a[8], 0.008)
 
     def test_one_feature_per_point_and_face_selected_at_point(self) -> None:
         fm = FakeFM()
@@ -307,7 +308,7 @@ class FilletTests(unittest.TestCase):
         a = fm.last("FeatureFillet3")
         self.assertEqual(a[0], 1 | 4)
         self.assertEqual(a[4], 1)
-        self.assertEqual(list(a[11].value), [0.002, 0.005])
+        self.assertEqual(list(a[7].value), [0.002, 0.005])
         self.assertEqual(h.selections[0][1], 0)
 
     def test_face_marks(self) -> None:
@@ -315,16 +316,17 @@ class FilletTests(unittest.TestCase):
         with Harness(fm) as h:
             sw_feature.fillet_variant({"type": "face", "radius_mm": 3, "face_set_1": {"faces": [0]}, "face_set_2": {"faces": [1]}})
         a = fm.last("FeatureFillet3")
-        self.assertEqual((a[0], a[1], a[4]), (1 | 2, 0.003, 2))
-        self.assertEqual([(s[1], s[2]) for s in h.selections], [(1, False), (2, True)])
+        self.assertEqual((a[0], a[1], a[4]), (1, 0.003, 2))
+        self.assertEqual([(s[1], s[2]) for s in h.selections], [(1, False), (4, True)])
 
-    def test_full_round_marks(self) -> None:
+    def test_full_round_refused_on_2017(self) -> None:
         fm = FakeFM()
-        with Harness(fm) as h:
-            sw_feature.fillet_variant({"type": "full_round", "side_set_1": {"faces": [0]},
-                                       "center": {"faces": [1]}, "side_set_2": {"faces": [2]}})
-        self.assertEqual(fm.last("FeatureFillet3")[4], 3)
-        self.assertEqual([s[1] for s in h.selections], [3, 4, 5])
+        with Harness(fm):
+            out = sw_feature.fillet_variant({"type": "full_round", "side_set_1": {"faces": [0]},
+                                             "center": {"faces": [1]}, "side_set_2": {"faces": [2]}})
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["data"]["fenced"])
+        self.assertFalse([n for n, _ in fm.calls if n == "FeatureFillet3"])
 
     def test_missing_inputs_do_not_touch_com(self) -> None:
         fm = FakeFM()
@@ -418,7 +420,7 @@ class MultiBodyTests(unittest.TestCase):
         self.assertEqual(len(a), 12)
         self.assertEqual(a[:4], (0.01, 0.0, 0.0, 0.0))
         self.assertEqual(a[4], 0.005)
-        self.assertAlmostEqual(a[9], math.pi / 2)
+        self.assertAlmostEqual(a[7], math.pi / 2)
         self.assertEqual(a[10:], (True, 3))
 
     def test_move_without_copy_zeroes_count(self) -> None:
@@ -516,9 +518,9 @@ class ShapingTests(unittest.TestCase):
                 {"sketch": "Sketch2", "face_selection": SEL, "wrap_type": "deboss", "thickness_mm": 0.5}
             )
         self.assertTrue(out["ok"])
-        self.assertEqual(h.by_id, [("Sketch2", "SKETCH", 1, False)])
-        self.assertEqual(h.selections[-1][1:], (2, True))
-        self.assertEqual(fm.last("InsertWrapFeature2"), (1, 0.0005, False, 0, 4))
+        self.assertEqual(h.by_id, [("Sketch2", "SKETCH", 4, False)])
+        self.assertEqual(h.selections[-1][1:], (1, True))
+        self.assertEqual(fm.last("InsertWrapFeature2"), (1, 0.0005, False, 1, 4))
         with Harness(FakeFM()):
             self.assertFalse(sw_body.wrap_sketch({"sketch": "S", "face_selection": SEL, "wrap_type": "x"})["ok"])
 

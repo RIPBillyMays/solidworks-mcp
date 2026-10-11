@@ -556,7 +556,7 @@ def edef(name, keys):
 
 def hole_keys():
     return ("Type", "Diameter", "Depth", "CounterBoreDiameter", "CounterBoreDepth", "CounterSinkDiameter", "CounterSinkAngle",
-            "TapDrillDiameter", "TapDrillDepth", "ThreadDiameter", "ThreadDepth", "ThreadClass", "Standard", "NearCounterSinkDiameter")
+            "TapDrillDiameter", "TapDrillDepth", "ThreadDiameter", "ThreadDepth", "ThreadClass", "Standard", "NearCounterSinkDiameter", "CosmeticThreadType", "ThreadEndCondition")
 
 
 def subfeats(name):
@@ -581,7 +581,8 @@ def stage_holes():
         ("H1 straight hole d6 through_all (removes 565.49)", {"kind": "hole", "standard": "iso", "fastener": "clearance", "size": "M6", "diameter_mm": 6, "end_condition": "through_all"}, 565.49),
         ("H2 counterbore d6, cb 12x4 through (removes 904.78)", {"kind": "counterbore", "standard": "iso", "fastener": "socket_head", "size": "M6", "diameter_mm": 6, "end_condition": "through_all", "cbore_diameter_mm": 12, "cbore_depth_mm": 4}, 904.78),
         ("H3 countersink d6, cs 12 @90 through (removes 678.58)", {"kind": "countersink", "standard": "iso", "fastener": "flat_head", "size": "M6", "diameter_mm": 6, "end_condition": "through_all", "csink_diameter_mm": 12, "csink_angle_deg": 90}, 678.58),
-        ("H4 tapped M6x1 blind 12 thread 10", {"kind": "tap", "standard": "iso", "fastener": "tapped", "size": "M6", "diameter_mm": 6, "end_condition": "blind", "depth_mm": 12, "thread_depth_mm": 10}, None),
+        ("H4 tapped M6x1.0 blind 12 thread 10 tap drill 5", {"kind": "tap", "standard": "iso", "fastener": "tapped", "size": "M6x1.0", "diameter_mm": 5, "end_condition": "blind", "depth_mm": 12, "thread_depth_mm": 10}, "TAP"),
+        ("H4b tapped via ansi_inch 1/4-20", {"kind": "tap", "standard": "ansi_inch", "fastener": "tapped", "size": "1/4-20", "diameter_mm": 5.1054, "end_condition": "blind", "depth_mm": 12, "thread_depth_mm": 10}, "TAPIN"),
     ]
     for label, args, exp in cases:
         v0 = vol()
@@ -591,7 +592,17 @@ def stage_holes():
         dv = v0 - vol()
         d = edef("Hw", hole_keys()) if r["ok"] else {}
         subs = subfeats("Hw") if r["ok"] else []
-        ok = r["ok"] and (exp is None or near(dv, exp, exp * 0.01))
+        if exp == "TAP":
+            ok = r["ok"] and near(d.get("ThreadDiameter"), 0.006, 1e-6) and near(d.get("ThreadDepth"), 0.010, 1e-6) and near(d.get("TapDrillDiameter"), 0.005, 1e-6) and near(d.get("TapDrillDepth"), 0.012, 1e-6) and 200 < dv < 400
+        elif exp == "TAPIN":
+            ok = r["ok"] and near(d.get("ThreadDiameter"), 0.25 * 0.0254, 1e-6) and 100 < dv < 600
+        else:
+            ok = r["ok"] and (exp is None or near(dv, exp, exp * 0.01))
+        if exp == "TAP" and r["ok"]:
+            ce = find_edge(lambda e: e["curve_type"] == "circle" and abs(e["point_mm"][2] - 20) < 0.1 and abs(e["radius_mm"] - 3.0) < 0.05)
+            rc = call(cosmetic_thread, {"selection": {"edges": [ce["index"]]}, "standard": 2, "standard_type": "Machine threads", "size": "M6x1.0", "diameter_mm": 6, "end_condition": "blind", "depth_mm": 10, "name": "HCT"}) if ce else {"ok": False, "message": "no tap-drill edge"}
+            subs_ct = subfeats("Hw")
+            log("H4c thread annotation: wizard sets none (CosmeticThreadType read-only), cosmetic_thread adds it", rc["ok"] and ("HCT", "CosmeticThread") in subs_ct and d.get("CosmeticThreadType") == 0, f"CosmeticThreadType={d.get('CosmeticThreadType')} sub={subs_ct} msg={rc['message'][:60]}")
         log(label, ok, f"removed={dv:.3f} exp={exp} def={d} sub={subs} msg={r['message'][:100]}")
         if r["ok"]:
             delf("Hw")
@@ -608,14 +619,13 @@ def stage_cosm():
     call(cut_extrude, {"sketch_name": "Sh", "end_condition": "through_all", "name": "Ct"})
     ce = find_edge(lambda e: e["curve_type"] == "circle" and abs(e["point_mm"][2] - 20) < 0.1)
     print("circle edge", ce)
-    for std in (0,):
-        r = call(cosmetic_thread, {"selection": {"edges": [ce["index"]]}, "standard": std, "standard_type": "ISO", "size": "M6x1.0",
-                                   "diameter_mm": 6, "end_condition": "blind", "depth_mm": 10, "name": "CTh"})
-        types = [t for n, t in feat_types() if n == "CTh" or "Cosmetic" in str(t)]
-        log("C1 cosmetic_thread M6x1.0 on bored hole edge", r["ok"] and bool(types), f"{r['message']} types={types} {feat_types()[-3:]}")
-        if r["ok"]:
-            d = edef("CTh", ("Diameter", "BlindDepth", "EndCondition", "Size", "Standard", "StandardType", "ApplyThread", "Note"))
-            log("C1b cosmetic thread definition readback", near(d.get("Diameter"), 0.006, 1e-6) and near(d.get("BlindDepth"), 0.01, 1e-6), f"{d}")
+    r = call(cosmetic_thread, {"selection": {"edges": [ce["index"]]}, "standard": 2, "standard_type": "Machine threads", "size": "M6x1.0",
+                               "diameter_mm": 6, "end_condition": "blind", "depth_mm": 10, "name": "CTh"})
+    subs = subfeats("Ct")
+    log("C1 cosmetic_thread present in tree under the hole", r["ok"] and ("CTh", "CosmeticThread") in subs, f"{r['message']} sub={subs}")
+    if r["ok"]:
+        d = edef("CTh", ("Diameter", "BlindDepth", "EndCondition", "Size", "Standard", "StandardType"))
+        log("C1b cosmetic thread definition readback (ISO M6x1.0, d6, depth 10)", d["Size"] == "M6x1.0" and d["Standard"] == 2 and near(d["Diameter"], 0.006, 1e-6) and near(d["BlindDepth"], 0.01, 1e-6), f"{d}")
 
 
 def stage_fillet():
@@ -636,26 +646,23 @@ def stage_fillet():
     log("F1b variable fillet 5->2 same removal", r["ok"] and abs(dv2 - exp) < exp * 0.08, f"removed={dv2:.2f}")
     if r["ok"]:
         delf("Fv")
-    # face fillet: top face (z=10) and front face (y=-10)
+    # face fillet: set1 = top face, set2 = front + left faces (two edges, 40 + 20 mm)
     top = pick_face([0, 0, 1], 10)
     front = pick_face([0, -1, 0], -10, axis=1)
-    r = call(fillet_variant, {"type": "face", "face_set_1": {"faces": [top["index"]]}, "face_set_2": {"faces": [front["index"]]}, "radius_mm": 3, "name": "Ff"})
+    left = pick_face([-1, 0, 0], -20, axis=0)
+    r = call(fillet_variant, {"type": "face", "face_set_1": {"faces": [top["index"]]}, "face_set_2": {"faces": [front["index"], left["index"]]}, "radius_mm": 3, "name": "Ff"})
     dv = v0 - vol()
-    exp = k * 9 * 40
-    log("F2 face fillet r3 between top and front (removes 77.25)", r["ok"] and abs(dv - exp) < 1.0, f"removed={dv:.3f} exp={exp:.3f}")
+    exp = k * 9 * 60
+    log("F2 face fillet r3, set1 top / set2 front+left (two edges ~115.9 less corner overlap)", r["ok"] and abs(dv - exp) < 4.0, f"removed={dv:.3f} exp~{exp:.3f}")
     if r["ok"]:
         delf("Ff")
-    # full round on thin bar
-    newdoc("part")
-    box(-5, -20, 5, 20, 10, "S1", "Bx", plane="front")
-    v0 = vol()
-    top = pick_face([0, 0, 1], 10)
-    left = pick_face([-1, 0, 0], -5, axis=0)
-    right = pick_face([1, 0, 0], 5, axis=0)
-    r = call(fillet_variant, {"type": "full_round", "side_set_1": {"faces": [left["index"]]}, "center": {"faces": [top["index"]]}, "side_set_2": {"faces": [right["index"]]}, "name": "Fr"})
+    r = call(fillet_variant, {"type": "face", "face_set_1": {"faces": [top["index"]]}, "face_set_2": {"faces": [front["index"]]}, "radius_mm": 3, "name": "Ff"})
     dv = v0 - vol()
-    exp = (10 * 5 - math.pi * 25 / 2) * 40
-    log("F3 full round across 10mm bar (removes 429.2)", r["ok"] and abs(dv - exp) < 3, f"removed={dv:.2f} exp={exp:.2f}")
+    log("F2b face fillet r3 top/front single edge (77.25)", r["ok"] and abs(dv - k * 9 * 40) < 1.0, f"removed={dv:.3f}")
+    if r["ok"]:
+        delf("Ff")
+    r = call(fillet_variant, {"type": "full_round", "side_set_1": {"faces": [0]}, "center": {"faces": [1]}, "side_set_2": {"faces": [2]}})
+    log("F3 full round", False, f"FeatureFillet3 type 3 builds a single edge fillet for all marks/options tried; refused. msg={r['message'][:90]}", status="FENCED")
 
 
 def stage_cs():
@@ -691,10 +698,7 @@ def stage_split():
     newdoc("part")
     box(-20, -10, 20, 10, 10, "S1", "Bx")
     r = call(split_body, {"tool_selection": {"planes": ["right"]}, "name": "Sp"})
-    bb = D(call(list_bodies))["bodies"]
-    log("SP1 split_body with Right plane (2 bodies, 4000 each)", r["ok"] and len(bb) == 2 and near(vol(), 8000, 1), f"{r['message']} bodies={[(b['min_mm'], b['max_mm']) for b in bb]}")
-    if r["ok"]:
-        delf("Sp")
+    log("SP1 split_body with Right plane", False, f"PreSplitBody2 returns 2 temp bodies but PostSplitBody builds nothing in every variant; fenced. nbodies={nbodies()}", status="FENCED")
     # intersect
     newdoc("part")
     sketch_rect("front", -20, -10, 20, 10, "S1")
@@ -714,7 +718,7 @@ def stage_wrap():
     lo, hi = bbox()
     print("cyl bbox", lo, hi)
     call(create_plane, {"mode": "offset", "selection": {"planes": ["right"]}, "distance_mm": 10, "name": "Pw"})
-    sketch_rect(None, -3, -3, 3, 3, "Sw", plane_name="Pw")
+    sketch_rect(None, -3, 12, 3, 18, "Sw", plane_name="Pw")
     cyl = next((f for f in faces() if f["surface_type"] == "cylinder"), None)
     print("cyl face", cyl)
     for wt, sign, label in (("emboss", 1, "W1 wrap emboss 1mm (adds ~36)"), ("deboss", -1, "W2 wrap deboss 1mm (removes ~36)")):
@@ -724,7 +728,33 @@ def stage_wrap():
         if r["ok"]:
             delf("Wr")
 
-STAGES = {"probe": stage_probe, "docdata": stage_docdata, "geo1": stage_geo1, "geo1b": stage_geo1b, "holes": stage_holes, "cosm": stage_cosm, "fillet": stage_fillet, "cs": stage_cs, "split": stage_split, "wrap": stage_wrap}
+def stage_bad():
+    newdoc("part")
+    box(-20, -10, 20, 10, 10, "S1", "Bx")
+    f0 = faces()[0]["index"]
+    e0 = edges()[0]["index"]
+    v0_ = verts()[0]["index"]
+    cases = [
+        ("dome on an edge", create_dome, {"selection": {"edges": [e0]}, "height_mm": 3}),
+        ("chamfer_vertex on a face", chamfer_vertex, {"selection": {"faces": [f0]}, "distance_mm": 2}),
+        ("variable fillet on a vertex", fillet_variant, {"type": "variable", "selection": {"vertices": [v0_]}, "radius_mm": 1, "end_radius_mm": 2}),
+        ("hole_wizard point off the part", hole_wizard, {"points": [{"x_mm": 500, "y_mm": 500, "z_mm": 500}], "size": "M6", "diameter_mm": 6, "end_condition": "through_all"}),
+        ("cosmetic_thread on a face", cosmetic_thread, {"selection": {"faces": [f0]}, "standard_type": "Machine threads", "size": "M6x1.0", "diameter_mm": 6}),
+        ("wrap_sketch with no sketch face", wrap_sketch, {"sketch": "S1", "face_selection": {"faces": [f0]}}),
+        ("coordinate system from 3 faces", create_coordinate_system, {"origin": {"faces": [f0]}, "x_axis": {"faces": [f0]}, "y_axis": {"faces": [f0]}}),
+        ("reference point face_center on an edge", create_reference_point, {"method": "face_center", "selection": {"edges": [e0]}}),
+        ("scale_part factor too small to be sane", scale_part, {"factor": 0.0000001}),
+    ]
+    for label, fn, a in cases:
+        r = call(fn, a)
+        # the point is that it returns (no modal hang) and the doc is intact
+        log(f"B1 bad input returns cleanly: {label}", near(vol(), 8000, 1) or r["ok"] is True, f"ok={r['ok']} msg={r['message'][:90]}")
+        if r["ok"]:
+            nm = D(r).get("feature")
+            if nm:
+                delf(nm)
+
+STAGES = {"probe": stage_probe, "docdata": stage_docdata, "geo1": stage_geo1, "geo1b": stage_geo1b, "holes": stage_holes, "cosm": stage_cosm, "fillet": stage_fillet, "cs": stage_cs, "split": stage_split, "wrap": stage_wrap, "bad": stage_bad}
 
 
 def finish(keep_base):

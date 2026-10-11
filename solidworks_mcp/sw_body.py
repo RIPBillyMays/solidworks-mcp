@@ -51,6 +51,7 @@ from .sw_core import (
     tool,
     to_m,
     to_rad,
+    value,
 )
 from .sw_feature import _feature_created_after, _feature_names
 
@@ -81,8 +82,9 @@ WRAP_TYPES: Final = {"emboss": 0, "deboss": 1, "scribe": 2}
 # swWrapMethods_e
 WRAP_METHODS: Final = {"analytical": 0, "spline_surface": 1}
 # Selection marks for wrap: the sketch, then the face it wraps onto
-WRAP_MARK_SKETCH: Final = 1
-WRAP_MARK_FACE: Final = 2
+# Live 2017: the sketch needs mark 4 and the face mark 1 (the 1/2 guess built nothing)
+WRAP_MARK_SKETCH: Final = 4
+WRAP_MARK_FACE: Final = 1
 # Selection marks for a body mirror (InsertMirrorFeature2): bodies, then the plane
 MIRROR_MARK_BODY: Final = 256  # live 2017: mark 1 is refused, 256 mirrors the body
 MIRROR_MARK_PLANE: Final = 2
@@ -258,7 +260,8 @@ def split_body(args: dict[str, Any]) -> dict[str, Any]:
     require_selection(doc, args["tool_selection"])
     manager = feature_manager(doc)
     with dialogs_suppressed():
-        pieces = manager.PreSplitBody2()
+        # no-argument member: pywin32 may have already evaluated it on attribute access
+        pieces = value(manager, "PreSplitBody2")
         targets = as_list(pieces) if not isinstance(pieces, bool) else []
         if not pieces:
             return result(False, "PreSplitBody2 produced nothing: the cutting entity does not cross a body.")
@@ -522,7 +525,7 @@ def create_helix(args: dict[str, Any]) -> dict[str, Any]:
         "sketch": {"type": "string"},
         "face_selection": SELECTION_SCHEMA,
         "wrap_type": {"type": "string", "enum": sorted(WRAP_TYPES), "default": "emboss"},
-        "method": {"type": "string", "enum": sorted(WRAP_METHODS), "default": "analytical"},
+        "method": {"type": "string", "enum": sorted(WRAP_METHODS), "default": "spline_surface", "description": "Live 2017: analytical builds nothing on a cylinder; spline_surface works."},
         "thickness_mm": {"type": "number", "exclusiveMinimum": 0, "default": 1},
         "reverse": {"type": "boolean", "default": False},
         "mesh_factor": {"type": "integer", "minimum": 1, "maximum": 10, "default": 4},
@@ -534,7 +537,7 @@ def wrap_sketch(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = require_part()
     exit_active_sketch(doc)
     wrap_type = str(args.get("wrap_type", "emboss"))
-    method = str(args.get("method", "analytical"))
+    method = str(args.get("method", "spline_surface"))
     if wrap_type not in WRAP_TYPES or method not in WRAP_METHODS:
         return result(False, f"Unknown wrap_type '{wrap_type}' or method '{method}'.")
     sketch_name, _ = resolve_sketch(doc, args["sketch"])

@@ -1141,7 +1141,8 @@ FILLET_TYPE_FULL_ROUND: Final = 3
 FILLET_OPT_VARIABLE_RADIUS: Final = 4
 # Selection marks for face and full-round fillets (swSimpleFilletWhichFaces_e)
 FILLET_MARK_FACE_SET1: Final = 1
-FILLET_MARK_FACE_SET2: Final = 2
+# Live 2017: mark 2 builds nothing for set 2; mark 4 does (set 1 = mark 1 confirmed by geometry)
+FILLET_MARK_FACE_SET2: Final = 4
 FILLET_MARK_ROUND_SET1: Final = 3
 FILLET_MARK_ROUND_CENTER: Final = 4
 FILLET_MARK_ROUND_SET2: Final = 5
@@ -1154,11 +1155,10 @@ COSMETIC_END: Final = {"blind": 0, "up_to_next": 1, "through": 2}
 def _hole_values(kind: str, args: dict[str, Any]) -> list[float]:
     """Value1..Value12 for HoleWizard5.
 
-    UNVERIFIED SLOT MAPPING (see docs/reports/phase5-batchB-geometry.md): the
-    reference only says Value1..12 depend on the hole type.  The first two slots
-    carry the head geometry (counterbore diameter and depth, or countersink
-    diameter and angle in radians); a tapped hole puts its thread depth in the
-    third.  ``raw_values_mm`` overrides everything so a live probe can correct it.
+    Slot mapping verified live on 2017 by reading the feature definition back:
+    counterbore = Value1 diameter, Value2 depth; countersink = Value1 diameter,
+    Value2 angle (radians); tapped = Value1 thread depth.  ``raw_values_mm``
+    overrides everything.
     """
     raw = args.get("raw_values_mm")
     if raw:
@@ -1172,7 +1172,14 @@ def _hole_values(kind: str, args: dict[str, Any]) -> list[float]:
         values[0] = to_m(args.get("csink_diameter_mm", 0.0))
         values[1] = to_rad(args.get("csink_angle_deg", 90.0))
     if kind in ("tap", "pipe_tap"):
-        values[2] = to_m(args.get("thread_depth_mm", 0.0))
+        # Live 2017 (read back through IWizardHoleFeatureData2): Value1 is the thread depth for a
+        # tapped hole; Value2 is the near-side countersink diameter. A zero thread depth makes the
+        # wizard fall back to a bogus 2 in thread, so default it to the drill depth.
+        thread = args.get("thread_depth_mm") or args.get("depth_mm") or 0.0
+        values[0] = to_m(thread)
+        # Value6 must be non-zero (any value works, probed 0.001 to 2.0): with 0 the wizard
+        # ignores the size string and builds a 2 in thread.  Treated as an on/off flag.
+        values[5] = 1.0
     return values
 
 
@@ -1184,8 +1191,9 @@ def _hole_values(kind: str, args: dict[str, Any]) -> list[float]:
     "din, jis, bsi or gb; fastener picks the wizard's fastener table (tapped, drill, clearance, "
     "tap_drill, socket_head, flat_head; tabulated for ansi_inch/ansi_metric/iso, otherwise give "
     "fastener_type_index). size is the wizard size string such as 'M6x1'. diameter_mm is the hole "
-    "(or tap drill) diameter. The Value1..12 mapping is not verified on 2017: pass raw_values_mm "
-    "to override it.",
+    "(or tap drill) diameter. Value1/2 mapping is verified on 2017 (cbore/csink); raw_values_mm overrides. "
+    "Tapped sizes are the wizard strings ('M6x1.0', '1/4-20'). The wizard adds no cosmetic thread through the "
+    "API (IWizardHoleFeatureData2.CosmeticThreadType is read-only): call cosmetic_thread on the hole edge.",
     {
         "kind": {"type": "string", "enum": sorted(HOLE_KINDS), "default": "hole"},
         "standard": {"type": "string", "enum": sorted(HOLE_STANDARDS), "default": "iso"},
@@ -1266,8 +1274,9 @@ def hole_wizard(args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "cosmetic_thread",
     "Add a cosmetic thread to a circular edge (selection.edges=[i]). standard is the integer "
-    "thread-standard index the SOLIDWORKS UI uses; standard_type and size are the strings the UI "
-    "shows (e.g. 'Machine threads', 'M6x1'); diameter_mm is the thread diameter.",
+    "thread-standard index (live 2017: 0 ANSI Inch, 1 ANSI Metric, 2 ISO, 4 another metric table); "
+    "standard_type and size are the strings the UI shows ('Machine threads', 'M6x1.0'). Unrecognised strings "
+    "silently fall back to the first table entry (size '2-4.5'), so verify the readback. diameter_mm is the thread diameter.",
     {
         "selection": SELECTION_SCHEMA,
         "standard": {"type": "integer", "default": 0},
@@ -1299,8 +1308,7 @@ def cosmetic_thread(args: dict[str, Any]) -> dict[str, Any]:
     "fillet_variant",
     "Fillet types beyond the constant-radius edge fillet. variable: selection.edges plus "
     "radius_mm (start) and end_radius_mm. face: face_set_1 and face_set_2 (selection specs with "
-    "faces) plus radius_mm. full_round: side_set_1, center and side_set_2 (one face each). "
-    "Variable and full-round are unverified on 2017 until probed live.",
+    "faces) plus radius_mm. full_round is not supported on 2017 and is refused.",
     {
         "type": {"type": "string", "enum": ["variable", "face", "full_round"]},
         "selection": SELECTION_SCHEMA,
@@ -1323,6 +1331,7 @@ def fillet_variant(args: dict[str, Any]) -> dict[str, Any]:
     radius = args.get("radius_mm")
     options = FILLET_PROPAGATE if bool(args.get("propagate", True)) else 0
     point_radii: Any = empty_variant()
+    edge_radii: Any = empty_variant()
 
     if kind == "variable":
         if radius is None or args.get("end_radius_mm") is None or not args.get("selection"):
@@ -1330,29 +1339,29 @@ def fillet_variant(args: dict[str, Any]) -> dict[str, Any]:
         require_selection(doc, args["selection"])
         options |= FILLET_OPT_VARIABLE_RADIUS
         ftype = FILLET_TYPE_VARIABLE
-        point_radii = double_array([to_m(radius), to_m(args["end_radius_mm"])])
+        # Live 2017: the start/end radii go in the Radii argument (PointRadiusArray built nothing).
+        edge_radii = double_array([to_m(radius), to_m(args["end_radius_mm"])])
     elif kind == "face":
         if radius is None or not (args.get("face_set_1") and args.get("face_set_2")):
             return result(False, "type=face needs radius_mm, face_set_1 and face_set_2.")
         require_selection(doc, args["face_set_1"], mark=FILLET_MARK_FACE_SET1)
         require_selection(doc, args["face_set_2"], mark=FILLET_MARK_FACE_SET2, append=True)
-        options |= FILLET_UNIFORM_RADIUS
+        # Live 2017: UniformRadius (2) in the options builds nothing for a face fillet.
         ftype = FILLET_TYPE_FACE
     elif kind == "full_round":
-        if not (args.get("side_set_1") and args.get("center") and args.get("side_set_2")):
-            return result(False, "type=full_round needs side_set_1, center and side_set_2.")
-        require_selection(doc, args["side_set_1"], mark=FILLET_MARK_ROUND_SET1)
-        require_selection(doc, args["center"], mark=FILLET_MARK_ROUND_CENTER, append=True)
-        require_selection(doc, args["side_set_2"], mark=FILLET_MARK_ROUND_SET2, append=True)
-        options |= FILLET_UNIFORM_RADIUS
-        ftype = FILLET_TYPE_FULL_ROUND
+        # Live 2017: FeatureFillet3 with type 3 never builds a full-round fillet; whatever the marks
+        # (1/2/4, 3/4/5, 2/4/1), options (0..16384) or radius, it makes one plain edge fillet of
+        # radius_mm instead.  Refused rather than returning the wrong geometry.
+        return result(False, "Not supported on SOLIDWORKS 2017: full_round fillets are not built by FeatureFillet3 "
+                      "(it makes a single constant-radius edge fillet); fillet each edge with the fillet tool instead.",
+                      fenced=True)
     else:
         return result(False, f"Unknown fillet type '{kind}'.")
 
     with dialogs_suppressed():
         feature = feature_manager(doc).FeatureFillet3(
             options, to_m(radius or 0.0), 0.0, 0.0, ftype, 0, 0,
-            empty_variant(), empty_variant(), empty_variant(),
+            edge_radii, empty_variant(), empty_variant(),
             empty_variant(), point_radii, empty_variant(), empty_variant(),
         )
     rename_feature(feature, args.get("name"))
