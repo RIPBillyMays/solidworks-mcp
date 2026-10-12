@@ -21,7 +21,7 @@
 
 ## Next steps (in order)
 1. Commit Batch C if Zach OKs.
-2. Optional quick look: why `move_component` didn't move a mated block in the C1 limit test (may be expected — mates resolve it back — or a bug).
+2. ✅ move_component checked: expected solver behavior (limit mates snap back); reporting improved, uncommitted. See `docs/reports/phase5-move-component.md`.
 3. 5.4 guided session per `docs/PLAN.md`, then 🧑 G5.
 
 ## Gotchas

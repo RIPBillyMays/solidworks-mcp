@@ -465,6 +465,8 @@ class ComponentToolTests(unittest.TestCase):
             out = sw_assembly.move_component({"component": "A-1", "x_mm": 50})
         self.assertTrue(out["ok"])
         self.assertIn("warning", out["data"])
+        self.assertEqual(out["data"]["requested_origin_mm"], [50.0, 0.0, 0.0])
+        self.assertEqual(out["data"]["origin_mm"], [0.0, 0.0, 0.0])
 
     def test_rotate_component(self) -> None:
         matrix = list(IDENTITY)

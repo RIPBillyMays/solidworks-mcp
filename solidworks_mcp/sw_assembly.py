@@ -999,9 +999,13 @@ def _moved_result(app: Any, doc: Any, component: Any, name: str, wanted: list[fl
         transform=_transform_summary(final),
     )
     if constrained:
+        payload["data"]["requested_origin_mm"] = mm_point(wanted[9:12])
         payload["data"]["warning"] = (
-            "The component did not land where requested; mates are probably constraining it. "
-            "Suppress or edit the mates (set_mate_suppression / edit_mate) to move it freely."
+            "The component did not land where requested (see requested_origin_mm vs origin_mm); mates are "
+            "constraining it. Programmatic moves are re-solved against the mates: a limit_distance/limit_angle "
+            "mate snaps back to its stored value (its min/max range only applies to interactive drags), and "
+            "a coincident mate only leaves its free directions movable. Suppress or edit the mates "
+            "(set_mate_suppression / edit_mate) to move it freely."
         )
     return payload
 
@@ -1009,7 +1013,9 @@ def _moved_result(app: Any, doc: Any, component: Any, name: str, wanted: list[fl
 @tool(
     "move_component",
     "Move a floating (not fixed) component. mode=relative adds x/y/z to its current origin; "
-    "mode=absolute puts its origin at x/y/z. Millimetres, assembly space. Mates still apply.",
+    "mode=absolute puts its origin at x/y/z. Millimetres, assembly space. Mates still apply: the move is "
+    "re-solved, so only directions the mates leave free actually change (limit mates snap back to their stored "
+    "value). Always check origin_mm in the result; a 'warning' means the request was not honoured.",
     {
         "component": {"type": "string", "description": "Component name from list_components."},
         "x_mm": {"type": "number", "default": 0},
