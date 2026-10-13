@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .sw_core import (
+    stamp_active_document,
     MATE_ALIGNMENTS,
     MATE_TYPES,
     SELECTION_SCHEMA,
@@ -414,6 +415,7 @@ def insert_component(args: dict[str, Any]) -> dict[str, Any]:
     final_matrix = component_transform(component)
     origin = mm_point(apply_transform([0.0, 0.0, 0.0], final_matrix)) if final_matrix else None
     used = str(safe(component, "ReferencedConfiguration", "") or "")
+    stamp_active_document(app)  # _open_silently may have switched documents
     payload = result(
         True,
         f"Inserted {path.name}.",

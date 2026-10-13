@@ -41,6 +41,7 @@ from .sw_core import (
     iter_components,
     invoke_no_arg,
     logger,
+    stamp_active_document,
     nothing,
     OUTPUT_ROOT,
     rebuild,
@@ -256,6 +257,7 @@ def new_document(kind: str) -> dict[str, Any]:
     doc = app.NewDocument(template, 0, 0.0, 0.0)
     if doc is None:
         return result(False, f"SOLIDWORKS did not create a {kind} document.")
+    stamp_active_document(app)
     return result(True, f"Created new {kind} document.", document=document_info(doc))
 
 
@@ -282,6 +284,7 @@ def open_document(args: dict[str, Any]) -> dict[str, Any]:
     # active, despite this tool promising otherwise.
     activation_errors = byref_long(0)
     activated = bool(app.ActivateDoc3(str(path), False, 0, activation_errors))
+    stamp_active_document(app)
     if not activated:
         return result(
             False,
@@ -678,6 +681,7 @@ def export_components(args: dict[str, Any]) -> dict[str, Any]:
             activate(doc)
 
     _, info = _run_with_preferences(app, plan, action)
+    stamp_active_document(app)  # the call switches documents; report the one active at the end
     return result(
         bool(exported) and not failed,
         f"Exported {len(exported)} of {len(targets)} components.",
@@ -889,3 +893,41 @@ def close_document(args: dict[str, Any]) -> dict[str, Any]:
     app.CloseDoc(title)
     remaining = len(_open_documents(app))
     return result(True, f"Closed '{title}'.", closed=title, remaining_documents=remaining)
+
+
+@tool(
+    "activate_document",
+    "Make an open document the active one, by title (case-insensitive; see list_open_documents). "
+    "Every document tool acts on the active document and reports it as active_document, so call this "
+    "before working on a different open document. Verified by reading the active title back.",
+    {"title": {"type": "string", "description": "Title as shown by list_open_documents."}},
+    ["title"],
+)
+def activate_document(args: dict[str, Any]) -> dict[str, Any]:
+    app = running_app()
+    wanted = str(args["title"])
+    target = None
+    for doc in _open_documents(app):
+        if str(value(doc, "GetTitle")).lower() == wanted.lower():
+            target = doc
+            break
+    if target is None:
+        return result(False, f"No open document is titled '{wanted}'. Call list_open_documents.")
+    title = str(value(target, "GetTitle"))
+    try:
+        flag_methods(app, "ActivateDoc3").ActivateDoc3(title, True, 0, byref_long(0))
+    except Exception as exc:
+        return result(False, f"SOLIDWORKS could not activate '{title}': {exc}")
+    # ActivateDoc3 can report success yet leave another document active, so
+    # trust only the active title read back.
+    current = app.ActiveDoc
+    actual = str(value(current, "GetTitle")) if current is not None else ""
+    stamp_active_document(app)  # whichever document is active now, switched or not
+    if actual.lower() != title.lower():
+        return result(
+            False,
+            f"Activation did not take effect: the active document is '{actual or '<none>'}', not '{title}'.",
+            requested=title,
+            actual=actual,
+        )
+    return result(True, f"Activated '{actual}'.", document=document_info(current))

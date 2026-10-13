@@ -157,6 +157,10 @@ For each FAIL, SILENT-FAIL or HANG:
 - CI: the compat tests run in `tests.yml`; delete or disable `publish-mcp.yml` in the fork (ADR-0001).
 - **Upstream sync runbook:** `git fetch upstream` → merge on a branch → 🧪 T2 → live T3 subset → merge.
 - Optional: offer generic fixes upstream as PRs (Zach decides each one).
+- **Field findings not reproduced (2026-10-12, `docs/reports/phase5-field-findings.md`; parked by Zach):** watch for these and re-probe if they recur.
+  - #4 `linear_pattern` reporting ok with no instances (the probe returned `ok:false` correctly).
+  - #6 `get_bounding_box` loose around arcs (the probe read exactly ±120/±35).
+  - #8 `delete_feature` deleting an extra selected sketch (the probe deleted only the target).
 
 🧑 **G7:** wrap-up review.
 

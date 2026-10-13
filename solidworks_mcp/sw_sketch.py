@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Modified for SOLIDWORKS 2017 support (fork).
+
 """Sketch creation, geometry, editing, relations, and dimensions.
 
 Relations and dimensions are what turn a floating sketch into a driveable,
@@ -21,6 +23,9 @@ afterthought.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from typing import Any
 
 from .sw_core import (
@@ -37,6 +42,7 @@ from .sw_core import (
     feature_property,
     find_feature,
     flag_methods,
+    invoke_no_arg,
     iter_feature_objects,
     latest_sketch,
     logger,
@@ -55,6 +61,7 @@ from .sw_core import (
     tool,
     to_deg,
     to_m,
+    mm_point,
     to_mm,
     to_rad,
     TRIM_CHOICES,
@@ -117,6 +124,335 @@ def _require_open_sketch() -> tuple[Any, Any]:
     _, doc = active_document()
     _active_sketch(doc)
     return doc, sketch_manager(doc)
+
+
+# --------------------------------------------------------------------------
+# Exact placement.  SketchManager.Create* runs with sketch inference and
+# snapping active, so in a crowded sketch the new geometry silently snaps to
+# nearby points (field finding #1: endpoints shifted ~1.2 mm, an arc centre
+# (0.5, 0) snapped to (0, 0)).  AddToDB creates geometry straight in the
+# database with no inference, and every drawing tool then reads the segment
+# back and compares it with the request, so a shift is reported, not hidden.
+# --------------------------------------------------------------------------
+
+# 1 micrometre, in metres.
+VERIFY_TOL_M = 1e-6
+
+
+@contextmanager
+def _sketch_db_mode(doc: Any) -> Iterator[None]:
+    """Create sketch geometry without inference or snapping, then restore.
+
+    Sets ``SketchManager.AddToDB`` and clears ``DisplayWhenAdded``; the previous
+    values come back in ``finally`` even if a Create* call raises.  User
+    preferences are not touched.
+    """
+    sketch_mgr = doc.SketchManager
+    previous = {
+        "AddToDB": safe(sketch_mgr, "AddToDB", False),
+        "DisplayWhenAdded": safe(sketch_mgr, "DisplayWhenAdded", True),
+    }
+    try:
+        sketch_mgr.AddToDB = True
+        sketch_mgr.DisplayWhenAdded = False
+        yield
+    finally:
+        for name, old in previous.items():
+            try:
+                setattr(sketch_mgr, name, bool(old))
+            except Exception:
+                logger.warning("Could not restore SketchManager.%s to %s.", name, old)
+        try:
+            invoke_no_arg(doc, "GraphicsRedraw2")
+        except Exception:
+            logger.info("Sketch geometry added; SOLIDWORKS declined an immediate graphics redraw.")
+
+
+def _xy(point: Any) -> tuple[float, float]:
+    """(x, y) in metres from a SOLIDWORKS point object or a plain sequence."""
+    if hasattr(point, "X"):
+        return float(point.X), float(point.Y)
+    return float(point[0]), float(point[1])
+
+
+def _read_point(segment: Any, member: str) -> tuple[float, float]:
+    return _xy(value(segment, member))
+
+
+def _mm2(point: tuple[float, float]) -> list[float]:
+    return mm_point(point)
+
+
+def _dist(a: tuple[float, float], b: tuple[float, float]) -> float:
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def _points_differ(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    return abs(a[0] - b[0]) > VERIFY_TOL_M or abs(a[1] - b[1]) > VERIFY_TOL_M
+
+
+def _mismatch(label: str, requested: Any, actual: Any, bad: list[str]) -> None:
+    bad.append(f"{label}: requested {requested}, actual {actual}")
+
+
+def _line_ends(segment: Any) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Endpoints of an ISketchLine, via the line-specific members (2017 compatible)."""
+    return _read_point(segment, "GetStartPoint2"), _read_point(segment, "GetEndPoint2")
+
+
+def _verify_line(
+    segment: Any, start: tuple[float, float], end: tuple[float, float]
+) -> tuple[dict[str, Any] | None, dict[str, Any], list[str]]:
+    """Returns (actual, requested, problems); actual is None when unreadable."""
+    requested = {"start_mm": _mm2(start), "end_mm": _mm2(end)}
+    try:
+        actual_start, actual_end = _line_ends(segment)
+    except Exception:
+        logger.info("Line created but its endpoints could not be read back.")
+        return None, requested, []
+    actual = {"start_mm": _mm2(actual_start), "end_mm": _mm2(actual_end)}
+    bad: list[str] = []
+    if _points_differ(actual_start, start):
+        _mismatch("start", requested["start_mm"], actual["start_mm"], bad)
+    if _points_differ(actual_end, end):
+        _mismatch("end", requested["end_mm"], actual["end_mm"], bad)
+    return actual, requested, bad
+
+
+def _finish_verified(
+    doc: Any,
+    before: int,
+    what: str,
+    actual: dict[str, Any] | None,
+    requested: dict[str, Any],
+    bad: list[str],
+) -> dict[str, Any]:
+    """Combine the segment-count check with the read-back comparison."""
+    drawn = _drawn(doc, before, what)
+    if not drawn["ok"]:
+        return drawn
+    if bad:
+        return result(
+            False,
+            f"SOLIDWORKS created {what} but not where requested ({'; '.join(bad)}). "
+            "The geometry is in the sketch at the actual position; delete or fix it before continuing.",
+            requested=requested,
+            actual=actual,
+            segments_added=drawn["data"]["segments_added"],
+        )
+    drawn["data"]["verified"] = actual is not None
+    if actual is not None:
+        drawn["data"]["actual"] = actual
+    return drawn
+
+
+def _verify_circle(
+    segment: Any, center: tuple[float, float], radius: float
+) -> tuple[dict[str, Any] | None, dict[str, Any], list[str]]:
+    requested = {"center_mm": _mm2(center), "radius_mm": round(to_mm(radius), 6)}
+    try:
+        actual_center = _read_point(segment, "GetCenterPoint2")
+        actual_radius = float(value(segment, "GetRadius"))
+    except Exception:
+        logger.info("Circle created but its centre/radius could not be read back.")
+        return None, requested, []
+    actual = {"center_mm": _mm2(actual_center), "radius_mm": round(to_mm(actual_radius), 6)}
+    bad: list[str] = []
+    if _points_differ(actual_center, center):
+        _mismatch("centre", requested["center_mm"], actual["center_mm"], bad)
+    if abs(actual_radius - radius) > VERIFY_TOL_M:
+        _mismatch("radius", requested["radius_mm"], actual["radius_mm"], bad)
+    return actual, requested, bad
+
+
+def _verify_arc(
+    segment: Any,
+    center: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+    direction: int = 1,
+) -> tuple[dict[str, Any] | None, dict[str, Any], list[str]]:
+    """Check a centre/start/end arc.  The end point is projected onto the radius.
+
+    Live on 2017: a clockwise request keeps the requested start/end order and
+    reports GetRotationDir = -1.  The sweep side is checked through
+    GetRotationDir (direction of travel from the read-back start to the
+    read-back end), which must equal the requested direction.  Swapped ends are
+    still tolerated as a set match, with the expected rotation then inverted.
+    """
+    radius = _dist(center, start)
+    span = _dist(center, end)
+    if span > 0:
+        end = (center[0] + (end[0] - center[0]) * radius / span, center[1] + (end[1] - center[1]) * radius / span)
+    requested = {
+        "center_mm": _mm2(center),
+        "start_mm": _mm2(start),
+        "end_mm": _mm2(end),
+        "radius_mm": round(to_mm(radius), 6),
+    }
+    try:
+        actual_center = _read_point(segment, "GetCenterPoint2")
+        actual_start = _read_point(segment, "GetStartPoint2")
+        actual_end = _read_point(segment, "GetEndPoint2")
+        actual_radius = float(value(segment, "GetRadius"))
+    except Exception:
+        logger.info("Arc created but its geometry could not be read back.")
+        return None, requested, []
+    actual = {
+        "center_mm": _mm2(actual_center),
+        "start_mm": _mm2(actual_start),
+        "end_mm": _mm2(actual_end),
+        "radius_mm": round(to_mm(actual_radius), 6),
+    }
+    bad: list[str] = []
+    if _points_differ(actual_center, center):
+        _mismatch("centre", requested["center_mm"], actual["center_mm"], bad)
+    if abs(actual_radius - radius) > VERIFY_TOL_M:
+        _mismatch("radius", requested["radius_mm"], actual["radius_mm"], bad)
+    in_order = not _points_differ(actual_start, start) and not _points_differ(actual_end, end)
+    swapped = not _points_differ(actual_start, end) and not _points_differ(actual_end, start)
+    if not (in_order or swapped):
+        _mismatch("end points", [requested["start_mm"], requested["end_mm"]],
+                  [actual["start_mm"], actual["end_mm"]], bad)
+    else:
+        try:
+            rotation = int(value(segment, "GetRotationDir"))
+        except Exception:
+            rotation = 0  # unreadable: the sweep side cannot be checked
+        if rotation in (1, -1):
+            expected = direction if in_order else -direction
+            actual["rotation_dir"] = rotation
+            if rotation != expected:
+                _mismatch("sweep", "counter-clockwise" if direction == 1 else "clockwise",
+                          "the other side of the circle", bad)
+    return actual, requested, bad
+
+
+def _verify_3point_arc(
+    segment: Any,
+    first: tuple[float, float],
+    second: tuple[float, float],
+    through: tuple[float, float],
+) -> tuple[dict[str, Any] | None, dict[str, Any], list[str]]:
+    """The two ends may come back in either order; the third point must lie on the arc's circle."""
+    requested = {"end_points_mm": [_mm2(first), _mm2(second)], "through_mm": _mm2(through)}
+    try:
+        actual_center = _read_point(segment, "GetCenterPoint2")
+        actual_start = _read_point(segment, "GetStartPoint2")
+        actual_end = _read_point(segment, "GetEndPoint2")
+        actual_radius = float(value(segment, "GetRadius"))
+    except Exception:
+        logger.info("3-point arc created but its geometry could not be read back.")
+        return None, requested, []
+    actual = {
+        "end_points_mm": [_mm2(actual_start), _mm2(actual_end)],
+        "center_mm": _mm2(actual_center),
+        "radius_mm": round(to_mm(actual_radius), 6),
+    }
+    bad: list[str] = []
+    straight = not _points_differ(actual_start, first) and not _points_differ(actual_end, second)
+    swapped = not _points_differ(actual_start, second) and not _points_differ(actual_end, first)
+    if not (straight or swapped):
+        _mismatch("end points", requested["end_points_mm"], actual["end_points_mm"], bad)
+    if abs(_dist(actual_center, through) - actual_radius) > VERIFY_TOL_M:
+        _mismatch("through point", requested["through_mm"], "not on the created arc", bad)
+    return actual, requested, bad
+
+
+def _flat_segments(created: Any) -> list[Any]:
+    """Flatten the (possibly nested) array a multi-segment Create* call returns."""
+    flat: list[Any] = []
+    for item in as_list(created):
+        if isinstance(item, (list, tuple)):
+            flat.extend(_flat_segments(item))
+        elif item is not None:
+            flat.append(item)
+    return flat
+
+
+def _line_segments(segments: Sequence[Any]) -> list[Any]:
+    """Keep only line segments (swSketchLINE is 0).
+
+    On 2017 CreatePolygon also returns its construction circle; counting it as
+    a side or a corner gave a false mismatch.  An unreadable type is kept.
+    """
+    kept = []
+    for segment in segments:
+        seg_type = safe(segment, "GetType")
+        try:
+            is_line = seg_type is None or int(seg_type) == 0
+        except (TypeError, ValueError):
+            is_line = True  # unreadable: keep, and let the read-back decide
+        if is_line:
+            kept.append(segment)
+    return kept
+
+
+def _vertices_of(segments: Sequence[Any]) -> list[tuple[float, float]] | None:
+    """Every line endpoint of the created segments, or None when any is unreadable."""
+    points: list[tuple[float, float]] = []
+    try:
+        for segment in segments:
+            points.extend(_line_ends(segment))
+    except Exception:
+        return None
+    return points or None
+
+
+def _verify_rectangle(
+    segments: Sequence[Any], first: tuple[float, float], second: tuple[float, float]
+) -> tuple[dict[str, Any] | None, dict[str, Any], list[str]]:
+    low = (min(first[0], second[0]), min(first[1], second[1]))
+    high = (max(first[0], second[0]), max(first[1], second[1]))
+    requested = {"min_corner_mm": _mm2(low), "max_corner_mm": _mm2(high)}
+    points = _vertices_of(_line_segments(segments))
+    if points is None:
+        logger.info("Rectangle created but its edges could not be read back.")
+        return None, requested, []
+    actual_low = (min(p[0] for p in points), min(p[1] for p in points))
+    actual_high = (max(p[0] for p in points), max(p[1] for p in points))
+    actual = {"min_corner_mm": _mm2(actual_low), "max_corner_mm": _mm2(actual_high)}
+    bad: list[str] = []
+    if _points_differ(actual_low, low):
+        _mismatch("min corner", requested["min_corner_mm"], actual["min_corner_mm"], bad)
+    if _points_differ(actual_high, high):
+        _mismatch("max corner", requested["max_corner_mm"], actual["max_corner_mm"], bad)
+    return actual, requested, bad
+
+
+def _verify_polygon(
+    segments: Sequence[Any],
+    center: tuple[float, float],
+    circumradius: float,
+    sides: int,
+) -> tuple[dict[str, Any] | None, dict[str, Any], list[str]]:
+    """Centroid of the corners must be the centre; every corner sits at the corner radius."""
+    requested = {"center_mm": _mm2(center), "circumradius_mm": round(to_mm(circumradius), 6), "sides": sides}
+    segments = _line_segments(segments)
+    points = _vertices_of(segments)
+    if points is None:
+        logger.info("Polygon created but its edges could not be read back.")
+        return None, requested, []
+    # Edges share corners, so de-duplicate the endpoints (edge order is not guaranteed).
+    corners: list[tuple[float, float]] = []
+    for candidate in points:
+        if not any(not _points_differ(candidate, known) for known in corners):
+            corners.append(candidate)
+    centroid = (sum(p[0] for p in corners) / len(corners), sum(p[1] for p in corners) / len(corners))
+    radii = [_dist(center, corner) for corner in corners]
+    actual = {
+        "center_mm": _mm2(centroid),
+        "circumradius_mm": round(to_mm(max(radii)), 6),
+        "sides": len(segments),
+    }
+    bad: list[str] = []
+    if _points_differ(centroid, center):
+        _mismatch("centre", requested["center_mm"], actual["center_mm"], bad)
+    if any(abs(r - circumradius) > VERIFY_TOL_M for r in radii):
+        _mismatch("circumradius", requested["circumradius_mm"], [round(to_mm(r), 6) for r in radii], bad)
+    if len(segments) != sides:
+        _mismatch("sides", sides, len(segments), bad)
+    return actual, requested, bad
 
 
 # --------------------------------------------------------------------------
@@ -224,7 +560,9 @@ _XY = {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}}
 
 @tool(
     "draw_line",
-    "Add a line to the open sketch. Coordinates are millimetres in sketch space.",
+    "Add a line to the open sketch. Coordinates are millimetres in sketch space and are exact: "
+    "the line is created without sketch inference or snapping, then its endpoints are read back "
+    "and compared with the request; ok is false (with requested and actual in mm) on any mismatch.",
     {
         "x1_mm": {"type": "number"}, "y1_mm": {"type": "number"},
         "x2_mm": {"type": "number"}, "y2_mm": {"type": "number"},
@@ -234,19 +572,122 @@ _XY = {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}}
 )
 def draw_line(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
+    start = (to_m(args["x1_mm"]), to_m(args["y1_mm"]))
+    end = (to_m(args["x2_mm"]), to_m(args["y2_mm"]))
     before = _segment_count(doc)
-    segment = manager.CreateLine(
-        to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-        to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
+    with _sketch_db_mode(doc):
+        segment = manager.CreateLine(start[0], start[1], 0.0, end[0], end[1], 0.0)
+        if segment is not None and bool(args.get("construction", False)):
+            segment.ConstructionGeometry = True
+        actual, requested, bad = _verify_line(segment, start, end) if segment is not None else (None, {}, [])
+    return _finish_verified(doc, before, "a line", actual, requested, bad)
+
+
+@tool(
+    "draw_polyline",
+    "Add a chain of connected lines through an ordered list of points (optionally closed back to the "
+    "first). Millimetres in sketch space; coordinates are exact (created without inference or "
+    "snapping, so dense or coincident geometry cannot shift them). Every vertex is read back and "
+    "verified; ok is false with the offending vertices (requested/actual in mm) on any mismatch. "
+    "Prefer this over many draw_line calls for outlines such as stars or stepped profiles.",
+    {
+        "points": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+                "type": "object",
+                "properties": {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}},
+                "required": ["x_mm", "y_mm"],
+            },
+        },
+        "closed": {"type": "boolean", "default": False},
+        "construction": {"type": "boolean", "default": False},
+    },
+    ["points"],
+)
+def draw_polyline(args: dict[str, Any]) -> dict[str, Any]:
+    raw_points = args.get("points") or []
+    closed = bool(args.get("closed", False))
+    vertices: list[tuple[float, float]] = []
+    for index, point in enumerate(raw_points):
+        try:
+            vertices.append((to_m(point["x_mm"]), to_m(point["y_mm"])))
+        except (KeyError, TypeError, ValueError):
+            return result(False, f"Point {index} needs numeric x_mm and y_mm.")
+    if len(vertices) < 2:
+        return result(False, "draw_polyline needs at least 2 points.")
+    if closed and len(vertices) < 3:
+        return result(False, "A closed polyline needs at least 3 points.")
+    pairs = list(zip(vertices, vertices[1:]))
+    if closed:
+        pairs.append((vertices[-1], vertices[0]))
+    for index, (start, end) in enumerate(pairs):
+        if _dist(start, end) < VERIFY_TOL_M:
+            return result(False, f"Segment {index} has zero length (its two points coincide); nothing was drawn.")
+
+    doc, manager = _require_open_sketch()
+    construction = bool(args.get("construction", False))
+    before = _segment_count(doc)
+    segments: list[dict[str, Any]] = []
+    bad_vertices: dict[int, dict[str, Any]] = {}
+    unreadable = 0
+    with _sketch_db_mode(doc):
+        for index, (start, end) in enumerate(pairs):
+            segment = manager.CreateLine(start[0], start[1], 0.0, end[0], end[1], 0.0)
+            if segment is None:
+                segments.append({"index": index, "created": False})
+                continue
+            if construction:
+                segment.ConstructionGeometry = True
+            actual, _, bad = _verify_line(segment, start, end)
+            entry: dict[str, Any] = {"index": index, "created": True}
+            if actual is None:
+                unreadable += 1
+            else:
+                entry.update(actual)
+            segments.append(entry)
+            if bad and actual is not None:
+                start_vertex = index
+                end_vertex = (index + 1) % len(vertices)
+                actual_start, actual_end = _line_ends(segment)
+                if _points_differ(actual_start, start):
+                    bad_vertices[start_vertex] = {
+                        "vertex": start_vertex, "requested_mm": _mm2(start), "actual_mm": actual["start_mm"],
+                    }
+                if _points_differ(actual_end, end):
+                    bad_vertices[end_vertex] = {
+                        "vertex": end_vertex, "requested_mm": _mm2(end), "actual_mm": actual["end_mm"],
+                    }
+
+    added = _segment_count(doc) - before
+    missing = [entry["index"] for entry in segments if not entry["created"]]
+    if missing or added < len(pairs):
+        return result(
+            False,
+            f"SOLIDWORKS created {max(added, 0)} of {len(pairs)} segments (segments {missing} were not "
+            "created); the partial polyline remains in the sketch.",
+            segments=segments, segments_added=max(added, 0), requested_segments=len(pairs),
+        )
+    if bad_vertices:
+        ordered = [bad_vertices[key] for key in sorted(bad_vertices)]
+        return result(
+            False,
+            f"{len(ordered)} polyline vertices are not where requested: "
+            + "; ".join(f"vertex {v['vertex']} requested {v['requested_mm']}, actual {v['actual_mm']}" for v in ordered)
+            + ". The segments remain in the sketch at their actual positions.",
+            bad_vertices=ordered, segments=segments, segments_added=added,
+        )
+    return result(
+        True,
+        f"Added a {'closed ' if closed else ''}polyline ({len(pairs)} segments).",
+        segments=segments, segments_added=added, closed=closed, verified=unreadable == 0,
     )
-    if segment is not None and bool(args.get("construction", False)):
-        segment.ConstructionGeometry = True
-    return _drawn(doc, before, "a line")
 
 
 @tool(
     "draw_centerline",
-    "Add a construction centerline to the open sketch, for revolve axes and symmetry. Millimetres.",
+    "Add a construction centerline to the open sketch, for revolve axes and symmetry. Millimetres. "
+    "Created without snapping; endpoints are read back and verified (ok false with requested/actual on mismatch).",
     {
         "x1_mm": {"type": "number"}, "y1_mm": {"type": "number"},
         "x2_mm": {"type": "number"}, "y2_mm": {"type": "number"},
@@ -255,17 +696,19 @@ def draw_line(args: dict[str, Any]) -> dict[str, Any]:
 )
 def draw_centerline(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
+    start = (to_m(args["x1_mm"]), to_m(args["y1_mm"]))
+    end = (to_m(args["x2_mm"]), to_m(args["y2_mm"]))
     before = _segment_count(doc)
-    manager.CreateCenterLine(
-        to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-        to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
-    )
-    return _drawn(doc, before, "a centerline")
+    with _sketch_db_mode(doc):
+        segment = manager.CreateCenterLine(start[0], start[1], 0.0, end[0], end[1], 0.0)
+        actual, requested, bad = _verify_line(segment, start, end) if segment is not None else (None, {}, [])
+    return _finish_verified(doc, before, "a centerline", actual, requested, bad)
 
 
 @tool(
     "draw_circle",
-    "Add a circle to the open sketch. Centre and radius are millimetres.",
+    "Add a circle to the open sketch. Centre and radius are millimetres and are exact (no snapping); "
+    "centre and radius are read back and verified, ok false with requested/actual on mismatch.",
     {
         "x_mm": {"type": "number"}, "y_mm": {"type": "number"},
         "radius_mm": {"type": "number", "exclusiveMinimum": 0},
@@ -275,18 +718,23 @@ def draw_centerline(args: dict[str, Any]) -> dict[str, Any]:
 )
 def draw_circle(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
+    center = (to_m(args["x_mm"]), to_m(args["y_mm"]))
+    radius = to_m(args["radius_mm"])
     before = _segment_count(doc)
-    segment = manager.CreateCircleByRadius(
-        to_m(args["x_mm"]), to_m(args["y_mm"]), 0.0, to_m(args["radius_mm"]),
-    )
-    if segment is not None and bool(args.get("construction", False)):
-        segment.ConstructionGeometry = True
-    return _drawn(doc, before, "a circle")
+    with _sketch_db_mode(doc):
+        segment = manager.CreateCircleByRadius(center[0], center[1], 0.0, radius)
+        if segment is not None and bool(args.get("construction", False)):
+            segment.ConstructionGeometry = True
+        actual, requested, bad = (None, {}, [])
+        if segment is not None:
+            actual, requested, bad = _verify_circle(segment, center, radius)
+    return _finish_verified(doc, before, "a circle", actual, requested, bad)
 
 
 @tool(
     "draw_rectangle",
-    "Add a corner rectangle to the open sketch. Both corners are millimetres.",
+    "Add a corner rectangle to the open sketch. Both corners are millimetres and are exact (no snapping); "
+    "the rectangle's extent is read back and verified, ok false with requested/actual on mismatch.",
     {
         "x1_mm": {"type": "number"}, "y1_mm": {"type": "number"},
         "x2_mm": {"type": "number"}, "y2_mm": {"type": "number"},
@@ -295,18 +743,21 @@ def draw_circle(args: dict[str, Any]) -> dict[str, Any]:
 )
 def draw_rectangle(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
+    first = (to_m(args["x1_mm"]), to_m(args["y1_mm"]))
+    second = (to_m(args["x2_mm"]), to_m(args["y2_mm"]))
     before = _segment_count(doc)
-    manager.CreateCornerRectangle(
-        to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-        to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
-    )
-    return _drawn(doc, before, "a rectangle")
+    with _sketch_db_mode(doc):
+        created = manager.CreateCornerRectangle(first[0], first[1], 0.0, second[0], second[1], 0.0)
+        actual, requested, bad = _verify_rectangle(_flat_segments(created), first, second)
+    return _finish_verified(doc, before, "a rectangle", actual, requested, bad)
 
 
 @tool(
     "draw_arc",
     "Add an arc defined by centre, start point, and end point. direction 1 is counter-clockwise, "
-    "-1 is clockwise. The start point sets the radius; the end point is projected onto it. Millimetres.",
+    "-1 is clockwise. The start point sets the radius; the end point is projected onto it. Millimetres. "
+    "Created without snapping; centre, radius and endpoints are read back and verified, ok false with "
+    "requested/actual on mismatch.",
     {
         "center_x_mm": {"type": "number"}, "center_y_mm": {"type": "number"},
         "start_x_mm": {"type": "number"}, "start_y_mm": {"type": "number"},
@@ -317,19 +768,26 @@ def draw_rectangle(args: dict[str, Any]) -> dict[str, Any]:
 )
 def draw_arc(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
+    center = (to_m(args["center_x_mm"]), to_m(args["center_y_mm"]))
+    start = (to_m(args["start_x_mm"]), to_m(args["start_y_mm"]))
+    end = (to_m(args["end_x_mm"]), to_m(args["end_y_mm"]))
     before = _segment_count(doc)
-    manager.CreateArc(
-        to_m(args["center_x_mm"]), to_m(args["center_y_mm"]), 0.0,
-        to_m(args["start_x_mm"]), to_m(args["start_y_mm"]), 0.0,
-        to_m(args["end_x_mm"]), to_m(args["end_y_mm"]), 0.0,
-        int(args.get("direction", 1)),
-    )
-    return _drawn(doc, before, "an arc")
+    with _sketch_db_mode(doc):
+        segment = manager.CreateArc(
+            center[0], center[1], 0.0, start[0], start[1], 0.0, end[0], end[1], 0.0,
+            int(args.get("direction", 1)),
+        )
+        actual, requested, bad = (None, {}, [])
+        if segment is not None:
+            actual, requested, bad = _verify_arc(segment, center, start, end, int(args.get("direction", 1)))
+    return _finish_verified(doc, before, "an arc", actual, requested, bad)
 
 
 @tool(
     "draw_3point_arc",
-    "Add an arc through three points: start, end, and a point on the arc. Millimetres.",
+    "Add an arc through three points: start, end, and a point on the arc. Millimetres. "
+    "Created without snapping; end points and the through point are read back and verified, ok false "
+    "with requested/actual on mismatch.",
     {
         "x1_mm": {"type": "number"}, "y1_mm": {"type": "number"},
         "x2_mm": {"type": "number"}, "y2_mm": {"type": "number"},
@@ -339,13 +797,18 @@ def draw_arc(args: dict[str, Any]) -> dict[str, Any]:
 )
 def draw_3point_arc(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
+    first = (to_m(args["x1_mm"]), to_m(args["y1_mm"]))
+    second = (to_m(args["x2_mm"]), to_m(args["y2_mm"]))
+    through = (to_m(args["x3_mm"]), to_m(args["y3_mm"]))
     before = _segment_count(doc)
-    manager.Create3PointArc(
-        to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-        to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
-        to_m(args["x3_mm"]), to_m(args["y3_mm"]), 0.0,
-    )
-    return _drawn(doc, before, "a 3-point arc")
+    with _sketch_db_mode(doc):
+        segment = manager.Create3PointArc(
+            first[0], first[1], 0.0, second[0], second[1], 0.0, through[0], through[1], 0.0,
+        )
+        actual, requested, bad = (None, {}, [])
+        if segment is not None:
+            actual, requested, bad = _verify_3point_arc(segment, first, second, through)
+    return _finish_verified(doc, before, "a 3-point arc", actual, requested, bad)
 
 
 @tool(
@@ -371,7 +834,11 @@ def draw_ellipse(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "draw_polygon",
-    "Add a regular polygon from its centre and one corner (inscribed) or edge midpoint (circumscribed). Millimetres.",
+    "Add a regular polygon from its centre and a point that sets the radius. Millimetres. The radius is the "
+    "distance from the centre to the point: the corner radius when inscribed (default), the apothem "
+    "(centre to edge midpoint) when circumscribed. A corner is always placed in the direction of the point "
+    "(the circumscribed corner radius is computed as apothem / cos(pi/sides)). Created without snapping; "
+    "centre and corner radius are read back and verified, ok false with requested/actual on mismatch.",
     {
         "center_x_mm": {"type": "number"}, "center_y_mm": {"type": "number"},
         "point_x_mm": {"type": "number"}, "point_y_mm": {"type": "number"},
@@ -382,13 +849,23 @@ def draw_ellipse(args: dict[str, Any]) -> dict[str, Any]:
 )
 def draw_polygon(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
+    center = (to_m(args["center_x_mm"]), to_m(args["center_y_mm"]))
+    point = (to_m(args["point_x_mm"]), to_m(args["point_y_mm"]))
+    sides = int(args.get("sides", 6))
+    inscribed = bool(args.get("inscribed", True))
+    # 2017 ignores the inscribed flag and always puts a corner at the given
+    # point, so compute that corner ourselves and always pass inscribed=True.
+    reach = _dist(center, point)
+    corner_radius = reach if inscribed else reach / math.cos(math.pi / sides)
+    scale = corner_radius / reach if reach > 0 else 1.0
+    corner = (center[0] + (point[0] - center[0]) * scale, center[1] + (point[1] - center[1]) * scale)
     before = _segment_count(doc)
-    manager.CreatePolygon(
-        to_m(args["center_x_mm"]), to_m(args["center_y_mm"]), 0.0,
-        to_m(args["point_x_mm"]), to_m(args["point_y_mm"]), 0.0,
-        int(args.get("sides", 6)), bool(args.get("inscribed", True)),
-    )
-    return _drawn(doc, before, "a polygon")
+    with _sketch_db_mode(doc):
+        created = manager.CreatePolygon(
+            center[0], center[1], 0.0, corner[0], corner[1], 0.0, sides, True,
+        )
+        actual, requested, bad = _verify_polygon(_flat_segments(created), center, corner_radius, sides)
+    return _finish_verified(doc, before, "a polygon", actual, requested, bad)
 
 
 @tool(

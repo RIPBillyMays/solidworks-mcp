@@ -215,10 +215,40 @@ def tool(
 # --------------------------------------------------------------------------
 
 
+# Title of the document the current tool call resolved via active_document().
+# Field users could not tell which document a result came from after a
+# document switch, so result() stamps it on the envelope.  The server resets
+# it per call (begin_call) so a stale title can never leak between calls.
+_call_document_title: str | None = None
+
+
+def begin_call() -> None:
+    """Forget the document title recorded by a previous tool call."""
+    global _call_document_title
+    _call_document_title = None
+
+
+def note_active_document(title: str | None) -> None:
+    """Record the document the running tool call operated on."""
+    global _call_document_title
+    _call_document_title = str(title) if title else None
+
+
+def stamp_active_document(app: Any) -> None:
+    """Record whichever document is active now (for tools that open/switch documents)."""
+    try:
+        doc = app.ActiveDoc
+        note_active_document(value(doc, "GetTitle") if doc is not None else None)
+    except Exception:
+        note_active_document(None)
+
+
 def result(ok: bool, message: str, **data: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {"ok": ok, "message": message}
     if data:
         payload["data"] = data
+    if _call_document_title:
+        payload["active_document"] = _call_document_title
     return payload
 
 
@@ -629,6 +659,10 @@ def active_document() -> tuple[Any, Any]:
     doc = app.ActiveDoc
     if doc is None:
         raise RuntimeError("SOLIDWORKS has no active document. Create or open a part/assembly first.")
+    try:
+        note_active_document(value(doc, "GetTitle"))
+    except Exception:
+        note_active_document(None)
     return app, flag_methods(doc, *_MODEL_DOC_METHODS, *_registered(*_DOC_INTERFACES))
 
 
