@@ -160,7 +160,21 @@ For each FAIL, SILENT-FAIL or HANG:
 - **Field findings not reproduced (2026-10-12, `docs/reports/phase5-field-findings.md`; parked by Zach):** watch for these and re-probe if they recur.
   - #4 `linear_pattern` reporting ok with no instances (the probe returned `ok:false` correctly).
   - #6 `get_bounding_box` loose around arcs (the probe read exactly ±120/±35).
-  - #8 `delete_feature` deleting an extra selected sketch (the probe deleted only the target).
+  - #8 `delete_feature` deleting an extra selected sketch (the probe deleted only the target). It was hardened anyway in `3e04c41`.
+- **Field-findings leftovers (2026-10-13), triaged here:**
+  - **`sw_core.whats_wrong` swallows exceptions** and returns `[]`. Callers can't tell "no problems" from "couldn't read". Fix by adding an error flag without breaking the existing callers.
+  - **#10's error/warning split is not live-verified.** No rebuild error could be provoked on 2017. Find a reliable error repro (e.g. a dangling sketch reference) and re-test.
+  - **#17:** `fillet_variant` `vertex_radii` for multi-edge variable chains. It is refused today, because the Radii array layout is unclear.
+  - **#12:** `construct_original` skips chained (unselected) splines and ellipses. They are reported in `skipped_curve_segments`.
+  - **#3:**
+    - an optional `document` argument on mutating tools
+    - an `active_document` stamp for `open_component` and the drawing tools
+  - **#2:** the COM lock is per call, not per workflow. A second client can interleave. Document it, or add a session lock if it bites.
+  - **#20:**
+    - section-view capture: a temporary section plane, or `capture_screenshot` with `hide_components`
+    - a regular-star helper (optional)
+  - **#21:** multiple allowed output roots (`SW_MCP_OUTPUT_ROOT` as a list). Only the copy-in/copy-back workflow is documented today.
+  - **`draw_ellipse`, `draw_slot`, `draw_spline`, `draw_point`** don't run in exact-geometry mode or verify their read-back yet (fix #1 scope).
 
 🧑 **G7:** wrap-up review.
 

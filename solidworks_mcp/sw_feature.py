@@ -62,6 +62,7 @@ from .sw_core import (
     iter_features,
     iter_feature_objects,
     logger,
+    nothing,
     rebuild,
     rename_feature,
     safe,
@@ -69,12 +70,14 @@ from .sw_core import (
     select_object,
     require_part,
     require_selection,
+    resolve_sketch,
     result,
     selectable,
     SELECTION_SCHEMA,
     select_sketch_for_feature,
     tool,
     to_m,
+    to_mm,
     to_rad,
     value,
     whats_wrong,
@@ -992,15 +995,229 @@ def sweep(args: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+# Loft connector alignment (finding #16).  SOLIDWORKS starts each loft profile at the vertex
+# nearest the selection pick point; with every pick at (0,0,0) the start vertices of the
+# profiles need not correspond, giving a null return (large mismatch) or a twisted loft
+# (partial mismatch).  We pick the vertex extreme along one shared in-plane direction.
+
+_LOFT_TWIST_TOLERANCE: Final = 0.05  # warn when the volume is >5% below the prismatoid estimate
+_LOFT_GEOM_TOL_M: Final = 1e-6
+_LOFT_START_TOL_MM: Final = 0.01  # an explicit start point must sit on a profile vertex
+
+
+def _loop_area_m2(segments: Sequence[dict[str, Any]]) -> float | None:
+    """Area enclosed by one closed chain of line/arc segments (sketch space, metres), else None.
+
+    Green's theorem: the polygon through the chain's vertices (shoelace) plus, for each arc, the
+    circular segment between arc and chord, r^2/2 * (theta - sin theta).  Sketch arcs run
+    counter-clockwise from start to end; a segment traversed backwards flips theta's sign.
+    """
+    if not segments:
+        return None
+    if len(segments) == 1 and segments[0]["kind"] == "arc":
+        arc = segments[0]
+        if math.dist(arc["start"], arc["end"]) < _LOFT_GEOM_TOL_M:
+            return math.pi * arc["r"] ** 2  # a full circle
+    remaining = list(segments)
+    first = remaining.pop(0)
+    chain = [(first, True)]
+    point = first["end"]
+    while remaining:
+        for index, seg in enumerate(remaining):
+            if math.dist(seg["start"], point) < _LOFT_GEOM_TOL_M:
+                chain.append((remaining.pop(index), True))
+                point = chain[-1][0]["end"]
+                break
+            if math.dist(seg["end"], point) < _LOFT_GEOM_TOL_M:
+                chain.append((remaining.pop(index), False))
+                point = chain[-1][0]["start"]
+                break
+        else:
+            return None  # open, branched or several loops: no single area
+    if math.dist(point, first["start"]) >= _LOFT_GEOM_TOL_M:
+        return None
+    total = 0.0
+    for seg, forward in chain:
+        p, q = (seg["start"], seg["end"]) if forward else (seg["end"], seg["start"])
+        total += (p[0] * q[1] - q[0] * p[1]) / 2.0
+        if seg["kind"] == "arc":
+            cx, cy = seg["center"]
+            a0 = math.atan2(seg["start"][1] - cy, seg["start"][0] - cx)
+            a1 = math.atan2(seg["end"][1] - cy, seg["end"][0] - cx)
+            # Signed travel start -> end: counter-clockwise is positive.  A clockwise arc
+            # keeps its start/end and reports GetRotationDir = -1.
+            if seg.get("rotation", 1) == -1:
+                sweep = -((a0 - a1) % (2 * math.pi))
+            else:
+                sweep = (a1 - a0) % (2 * math.pi)
+            if not forward:
+                sweep = -sweep
+            total += seg["r"] ** 2 / 2.0 * (sweep - math.sin(sweep))
+    return abs(total)
+
+
+def _prismatoid_volume(height: float, area1: float, area2: float) -> float:
+    """h/6 * (A1 + 4*Am + A2), with the mid-section Am approximated by the mean of the ends."""
+    return height / 6.0 * (area1 + 4.0 * (area1 + area2) / 2.0 + area2)
+
+
+def _profile_info(doc: Any, name: str) -> dict[str, Any]:
+    """Segment count, model-space vertices (mm), plane axes and area (mm2) of a profile sketch.
+
+    Every field is best effort: a field that cannot be read is None/empty so the loft can fall
+    back to the old behaviour instead of failing.
+    """
+    from .sw_sketch import _read_point, _sketch_axes  # noqa: PLC0415
+
+    info: dict[str, Any] = {"name": name, "segment_count": None, "vertices_mm": [], "axes": {}, "area_mm2": None}
+    try:
+        _, feature = resolve_sketch(doc, name)
+        sketch = value(feature, "GetSpecificFeature2")
+        raw = [s for s in as_list(safe(sketch, "GetSketchSegments")) if not safe(s, "ConstructionGeometry", False)]
+    except Exception:
+        logger.info("Could not read the segments of loft profile %s", name)
+        return info
+    info["segment_count"] = len(raw)
+    axes = _sketch_axes(sketch)
+    info["axes"] = axes
+    parsed: list[dict[str, Any]] = []
+    complete = True
+    for segment in raw:
+        try:
+            kind_code = int(safe(segment, "GetType", 0))
+            if kind_code not in (0, 1):
+                complete = False
+                continue
+            entry: dict[str, Any] = {
+                "kind": "line" if kind_code == 0 else "arc",
+                "start": _read_point(segment, "GetStartPoint2"),
+                "end": _read_point(segment, "GetEndPoint2"),
+            }
+            if kind_code == 1:
+                entry["center"] = _read_point(segment, "GetCenterPoint2")
+                entry["r"] = float(value(segment, "GetRadius"))
+                try:
+                    entry["rotation"] = -1 if int(value(segment, "GetRotationDir")) == -1 else 1
+                except Exception:
+                    entry["rotation"] = 1  # unreadable: assume counter-clockwise
+            parsed.append(entry)
+        except Exception:
+            complete = False
+    if axes and parsed:
+        origin, xa, ya = axes["origin"], axes["sketch_x_axis"], axes["sketch_y_axis"]
+        for entry in parsed:
+            for end in ("start", "end"):
+                u, v = (to_mm(c) for c in entry[end])
+                info["vertices_mm"].append([origin[i] + u * xa[i] + v * ya[i] for i in range(3)])
+    if complete and parsed:
+        area = _loop_area_m2(parsed)
+        info["area_mm2"] = None if area is None else area * 1e6
+    return info
+
+
+def _align_start_points(infos: Sequence[dict[str, Any]]) -> list[list[float]] | None:
+    """One pick point (model mm) per profile: the vertex extreme along a shared in-plane direction.
+
+    The frame is the first profile's sketch axes; the score is u + v along them, so the same
+    model-space corner wins on every profile.  Ties (the two tangent points of a filleted
+    corner) break toward larger v, giving every profile the same relative vertex.
+    """
+    first_axes = infos[0].get("axes") or {}
+    if not first_axes:
+        return None
+    ex, ey = first_axes["sketch_x_axis"], first_axes["sketch_y_axis"]
+
+    def score(point: Sequence[float]) -> tuple[float, float, float]:
+        u = sum(p * e for p, e in zip(point, ex))
+        v = sum(p * e for p, e in zip(point, ey))
+        return (round(u + v, 4), round(v, 4), round(u, 4))
+
+    picks: list[list[float]] = []
+    for info in infos:
+        vertices = info.get("vertices_mm") or []
+        if not vertices:
+            return None
+        picks.append([round(c, 6) for c in max(vertices, key=score)])
+    return picks
+
+
+def _select_loft_profiles(doc: Any, profiles: Sequence[str], points_mm: Sequence[Sequence[float]]) -> list[str]:
+    """Select each profile sketch at its pick point (mark 1); returns the names that failed."""
+    clear_selection(doc)
+    ext = extension(doc)
+    failed: list[str] = []
+    for index, (name, point) in enumerate(zip(profiles, points_mm)):
+        x, y, z = (to_m(c) for c in point[:3])
+        try:
+            ok = bool(ext.SelectByID2(name, "SKETCH", x, y, z, index > 0, 1, nothing(), 0))
+        except Exception:
+            ok = bool(ext.SelectByID2(name, "SKETCH", x, y, z, index > 0, 1, pythoncom.Nothing, 0))
+        if not ok:
+            failed.append(name)
+    return failed
+
+
+def _parse_start_points(raw: Any, count: int) -> list[list[float]]:
+    if not isinstance(raw, (list, tuple)) or len(raw) != count:
+        raise ValueError(f"start_points needs exactly one [x, y, z] point (mm) per profile ({count}).")
+    points = []
+    for item in raw:
+        if not isinstance(item, (list, tuple)) or len(item) != 3:
+            raise ValueError("Each start point must be [x, y, z] in model-space millimetres.")
+        points.append([float(c) for c in item])
+    return points
+
+
+def _loft_twist_warning(
+    doc: Any, infos: Sequence[dict[str, Any]], before: float | None, data: dict[str, Any]
+) -> str | None:
+    """Compare the built volume with the prismatoid estimate for two parallel planar profiles."""
+    if len(infos) != 2 or any(i.get("area_mm2") is None for i in infos):
+        data["twist_check"] = "skipped: needs two profiles with readable line/arc areas"
+        return None
+    a0, a1 = (i.get("axes") or {} for i in infos)
+    if not a0 or not a1:
+        data["twist_check"] = "skipped: sketch planes unreadable"
+        return None
+    n0, n1 = a0["normal"], a1["normal"]
+    if abs(sum(p * q for p, q in zip(n0, n1))) < 0.999999:
+        data["twist_check"] = "skipped: profile planes are not parallel"
+        return None
+    height = abs(sum((q - p) * n for p, q, n in zip(a0["origin"], a1["origin"], n0)))
+    after = _volume_mm3(doc)
+    if height < 1e-6 or after is None:
+        data["twist_check"] = "skipped: no spacing or volume available"
+        return None
+    delta = after - (before if before is not None else 0.0)
+    expected = _prismatoid_volume(height, infos[0]["area_mm2"], infos[1]["area_mm2"])
+    data.update(volume_delta_mm3=round(delta, 4), expected_volume_mm3=round(expected, 4))
+    if expected > 0 and delta < expected * (1.0 - _LOFT_TWIST_TOLERANCE):
+        return (
+            f"warning: possible twist. The loft added {delta:.1f} mm3, {100 * (1 - delta / expected):.1f}% "
+            f"below the {expected:.1f} mm3 estimate for these profiles. The profile start vertices may not "
+            "correspond; pass start_points (one model-space point per profile, on the matching corner)."
+        )
+    return None
+
+
 @tool(
     "loft",
-    "Loft a solid through two or more profile sketches, in the order given.",
+    "Loft a solid through two or more profile sketches, in the order given. SOLIDWORKS starts each "
+    "profile at the vertex nearest the pick point; mismatched starts give a null result or a twisted "
+    "loft. By default the tool picks, on every profile, the vertex extreme along one shared in-plane "
+    "direction and reports it as start_points_mm; pass start_points to choose the connector yourself.",
     {
         "profile_sketches": {
             "type": "array",
             "minItems": 2,
             "items": {"type": "string"},
             "description": "Sketch feature names, ordered from one end of the loft to the other.",
+        },
+        "start_points": {
+            "type": "array",
+            "items": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+            "description": "Optional: one [x, y, z] model-space point in mm per profile, on or near the "
+            "vertex where that profile should start. Use matching corners on every profile.",
         },
         "cut": {"type": "boolean", "default": False},
         "closed": {"type": "boolean", "default": False},
@@ -1014,14 +1231,59 @@ def loft(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = require_part()
     exit_active_sketch(doc)
     profiles = [str(name) for name in args["profile_sketches"]]
-    clear_selection(doc)
-    for index, name in enumerate(profiles):
-        require_selection(doc, {"sketches": [name]}, mark=1, append=index > 0)
+    cut = bool(args.get("cut", False))
+    closed = bool(args.get("closed", False))
+    warnings: list[str] = []
+
+    infos = [_profile_info(doc, name) for name in profiles]
+    counts = [i.get("segment_count") for i in infos]
+    if args.get("start_points") is not None:
+        try:
+            picks: list[list[float]] | None = _parse_start_points(args["start_points"], len(profiles))
+        except ValueError as exc:
+            return result(False, str(exc))
+        explicit = True
+        # SelectByID2 returns True on 2017 even far off the sketch, so check the points ourselves.
+        for name, info, point in zip(profiles, infos, picks):
+            vertices = info.get("vertices_mm") or []
+            if vertices and min(math.dist(point, v) for v in vertices) > _LOFT_START_TOL_MM:
+                listed = sorted({tuple(round(c, 3) for c in v) for v in vertices})
+                return result(
+                    False,
+                    f"start_points entry {[round(c, 3) for c in point]} for '{name}' is not within "
+                    f"{_LOFT_START_TOL_MM} mm of a vertex of that profile. Its vertices (mm): "
+                    f"{[list(v) for v in listed]}.",
+                    profiles=profiles, start_points_mm=picks, profile=name,
+                    profile_vertices_mm=[list(v) for v in listed],
+                )
+    else:
+        picks = _align_start_points(infos)
+        explicit = False
+        if picks is None:
+            warnings.append(
+                "warning: could not read the profile vertices, so the loft used each sketch's default "
+                "start point (pick at the origin); pass start_points if the loft fails or twists."
+            )
+
+    if picks is not None:
+        failed = _select_loft_profiles(doc, profiles, picks)
+        if failed and explicit:
+            clear_selection(doc)
+            return result(False, f"start_points did not land on profile sketch(es): {', '.join(failed)}.",
+                          profiles=profiles, start_points_mm=picks)
+        if failed:
+            warnings.append(f"warning: the auto-aligned pick missed {', '.join(failed)}; used default picks.")
+            picks = None
+    if picks is None:
+        clear_selection(doc)
+        for index, name in enumerate(profiles):
+            require_selection(doc, {"sketches": [name]}, mark=1, append=index > 0)
 
     manager = feature_manager(doc)
-    closed = bool(args.get("closed", False))
     keep_tangency = bool(args.get("keep_tangency", False))
-    if bool(args.get("cut", False)):
+    merge = bool(args.get("merge", True))
+    volume_before = _volume_mm3(doc) if not cut and merge else None
+    if cut:
         # InsertCutBlend takes neither tangent-length nor merge arguments.
         feature = manager.InsertCutBlend(
             closed, keep_tangency, False, 1.0,
@@ -1032,10 +1294,34 @@ def loft(args: dict[str, Any]) -> dict[str, Any]:
             closed, keep_tangency, False, 1.0,
             0, 0, 0.0, 0.0, True, True,
             False, 0.0, 0.0, 0,
-            bool(args.get("merge", True)), True, True, 0,
+            merge, True, True, 0,
         )
     rename_feature(feature, args.get("name"))
-    return feature_result(doc, feature, "loft", profiles=profiles)
+    payload = feature_result(
+        doc, feature, "loft", profiles=profiles,
+        start_points_mm=picks, profile_segment_counts=counts,
+    )
+    data = payload.setdefault("data", {})
+    if feature is None:
+        causes = ["profile start points do not correspond, so pass start_points with matching corners"]
+        if None not in counts and len(set(counts)) > 1:
+            causes.append(
+                f"the profiles have different segment counts ({dict(zip(profiles, counts))}), so give "
+                "them the same number of segments, e.g. the same fillets"
+            )
+        if closed and len(profiles) < 3:
+            causes.append("closed=true needs at least 3 profiles (it fails with 2)")
+        hint = "Likely causes: " + "; ".join(f"({i}) {c}" for i, c in enumerate(causes, 1))
+        clear_selection(doc)
+        data["hint"] = hint + "."
+        payload["message"] += " " + data["hint"]
+    elif not cut and merge and payload.get("ok"):
+        twist = _loft_twist_warning(doc, infos, volume_before, data)
+        if twist:
+            warnings.append(twist)
+    if warnings:
+        data["warnings"] = warnings
+    return payload
 
 
 # --------------------------------------------------------------------------

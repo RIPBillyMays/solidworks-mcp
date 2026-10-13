@@ -101,3 +101,13 @@ This is the log of every modification this fork makes to files that came from `S
   - **New tool `delete_sketch_segment`:** the replacement for undo of draw_* geometry. Exact-geometry mode, AddToDB, bypasses the undo stack. Zach chose option A on 2026-10-13.
   - **`sw_select.undo`:** the description, and the result when nothing changed inside a sketch, explain the undo limit and point to `delete_sketch_segment`.
   - **`sw_file.rebuild_document(force_all)`:** reads `ForceRebuildAll` as a property, because it is one on 2017. Calling it raised TypeError.
+- **Loft (2026-10-13, field finding #16):** `solidworks_mcp/sw_feature.py` `loft`.
+  - **Root cause:** every profile was picked at (0,0,0), so the start vertices didn't match. That gave a null result, or a silently twisted loft. See `docs/reports/phase5-loft-investigation.md`.
+  - **Fix:**
+    - New `start_points` argument. Each point is validated to within 0.01 mm of a profile vertex, because on 2017 `SelectByID2` accepts off-sketch picks.
+    - The default auto-aligns the picks to matching vertices.
+    - The result reports `start_points_mm` and `profile_segment_counts`.
+    - A null result carries a hint and clears the selection.
+    - A `possible twist` warning fires when the volume is more than 5% below the prismatoid estimate. Arcs are signed by `GetRotationDir`.
+  - **Tests:** `tests/test_sw2017_loft.py`.
+  - **Live:** `tests/live_p5_loft_probe.py`, `tests/live_p5_loft_fix.py` (`docs/reports/phase5-loft-fix-live.md`).

@@ -200,6 +200,16 @@ def main() -> None:
     case("41 corner-origin", "A x0..240, B x0..234.4 (left aligned)", A, tool_loft(), cxA=120, cxB=117.2)
     case("42 corner-origin right", "A x0..240, B x5.6..240 (right aligned)", A, tool_loft(), cxA=120, cxB=122.8)
     case("43 B only fillets", "A sharp 240x70, B R16", (240, 70, 0, 234.4, 70, 16), tool_loft())
+    case("24 B rev=3 matched picks", "SB mode3, picks +X+Y top tangent both", A, com_loft(mp()), revB=3)
+    case("25 B rev=3 picks at SB start vertex far", "SB mode3, pick SA +X+Y, SB -X-Y", A, com_loft(mm), revB=3)
+    case("26 B rev=3 picks mm2", "SB mode3, pick SA +X+Y, SB +X-Y", A,
+         com_loft(lambda st: [(224, 35, 0), (234.4 / 2 - 16, -35, st["zb"])]), revB=3)
+    case("27 B rev=3 picks mm3", "SB mode3, pick SA +X+Y, SB -X+Y", A,
+         com_loft(lambda st: [(224, 35, 0), (-(234.4 / 2 - 16), 35, st["zb"])]), revB=3)
+    case("44 B 3 fillets", "A 4 fillets, B 3 fillets", A, tool_loft(), orderB=[0, 1, 2])
+    case("45 A 3 fillets", "A 3 fillets, B 4 fillets", A, tool_loft(), orderA=[0, 1, 2])
+    case("46 both 3 fillets same", "both 3 fillets", A, tool_loft(), orderA=[0, 1, 2], orderB=[0, 1, 2])
+    case("47 both 3 fillets different", "A fillets 0,1,2 B fillets 1,2,3", A, tool_loft(), orderA=[0, 1, 2], orderB=[1, 2, 3])
     print("\n".join(ROWS))
     print("DONE")
 
