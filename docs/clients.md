@@ -29,6 +29,17 @@ Read this before you ask any client to do real work.
 - [ ] Be at the keyboard so you can dismiss a dialog if a call hangs.
 - [ ] Start with `solidworks_status` ("what SOLIDWORKS version and document are you attached to?") before anything that changes a model.
 
+### Working on CAD that lives in another repo (field finding #21)
+
+The server only reads and writes files under its **output root** (ADR-0005). Anything else is refused, on purpose, so a project that keeps its CAD in its own repo cannot be saved to in place. The workflow is copy in, work, copy back:
+
+1. Copy the files you want to work on from the project repo into the output root (for this repo, `C:\_Projects\solidworks-mcp\sandbox\<project>\`). For an assembly, copy the whole folder tree so the references still resolve.
+2. Open and edit the copies through the MCP tools. Saves, exports and `save_as` all go under the output root.
+3. Review the result (feature tree, mass, screenshot), then copy the changed files back into the project repo yourself and commit them there. The server never writes outside the output root, so this step is always a manual or separate-tool copy.
+4. Delete the copies from `sandbox\` when you are done (it is gitignored, so it never reaches either repo).
+
+**`SW_MCP_OUTPUT_ROOT`** sets the output root. The code default (`OUTPUT_ROOT` in `solidworks_mcp/sw_core.py`) is `~\Documents\solidworks-mcp`, that is `C:\Users\<you>\Documents\solidworks-mcp`, when the variable is unset or empty. For this repo set it to `C:\_Projects\solidworks-mcp\sandbox` (Claude Code and Claude Desktop are already configured that way). One root only: a list of allowed roots is not supported. Screenshots kept with `capture_screenshot save_as` land in `<output root>\screenshots\`.
+
 ### About rules and instructions files
 
 - Codex reads `AGENTS.md`. Claude Code reads `CLAUDE.md`. Each file only affects sessions started in this repo (or a folder under it). Claude Desktop reads neither.

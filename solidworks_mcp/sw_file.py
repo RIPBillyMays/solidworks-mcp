@@ -45,6 +45,7 @@ from .sw_core import (
     nothing,
     OUTPUT_ROOT,
     rebuild,
+    rebuild_detail,
     require_part,
     select_by_id,
     result,
@@ -698,19 +699,50 @@ def export_components(args: dict[str, Any]) -> dict[str, Any]:
     {"force_all": {"type": "boolean", "default": False, "description": "Rebuild every feature, not just the stale ones."}},
 )
 def rebuild_document(args: dict[str, Any]) -> dict[str, Any]:
+    from .sw_core import whats_wrong_split
+
     _, doc = active_document()
+    detail: dict[str, Any]
     if bool(args.get("force_all", False)):
         try:
-            rebuilt = bool(extension(doc).ForceRebuildAll())
-        except Exception:
-            rebuilt = rebuild(doc)
+            # On 2017 late binding ForceRebuildAll surfaces as a property (a bool),
+            # so calling it raised TypeError; value() reads it either way.
+            raw = value(extension(doc), "ForceRebuildAll")
+            detail = {"ok": bool(raw), "raw": raw if isinstance(raw, (bool, int, float, str, type(None))) else repr(raw), "error": None}
+        except Exception as exc:
+            detail = {"ok": False, "raw": None, "error": f"ForceRebuildAll failed: {type(exc).__name__}: {exc}"}
     else:
-        rebuilt = rebuild(doc)
-    problems = whats_wrong(doc)
+        detail = rebuild_detail(doc)
+    problems, warnings = whats_wrong_split(doc)
+
+    forced = False
+    if not problems and not detail["ok"]:
+        # EditRebuild3 raises or returns False on some healthy models (live finding #10);
+        # ForceRebuild3 is the second opinion.  Warnings never fail a rebuild.
+        try:
+            with dialogs_suppressed():
+                raw_force = flag_methods(doc, "ForceRebuild3").ForceRebuild3(False)
+            detail["force_raw"] = raw_force if isinstance(raw_force, (bool, int, float, str, type(None))) else repr(raw_force)
+            # A False return means SOLIDWORKS did not rebuild; do not call that ok.
+            forced = bool(raw_force)
+            if not forced:
+                detail["force_error"] = f"ForceRebuild3 returned {raw_force!r}"
+        except Exception as exc:
+            detail["force_error"] = f"{type(exc).__name__}: {exc}"
+        if forced:
+            problems, warnings = whats_wrong_split(doc)
+
+    ok = not problems and (detail["ok"] or forced)
     return result(
-        rebuilt and not problems,
-        "Rebuilt the active document." if rebuilt and not problems else "The rebuild reported problems.",
+        ok,
+        "Rebuilt the active document." if ok else "The rebuild reported problems.",
         problems=problems,
+        warnings=warnings,
+        rebuild_returned=detail["raw"],
+        rebuild_error=detail["error"],
+        **({"force_rebuild_used": True} if forced else {}),
+        **({"force_rebuild_returned": detail["force_raw"]} if "force_raw" in detail else {}),
+        **({"force_rebuild_error": detail["force_error"]} if "force_error" in detail else {}),
     )
 
 

@@ -30,6 +30,8 @@ from typing import Any
 
 from .sw_core import (
     active_document,
+    as_list,
+    find_feature,
     apply_selection,
     apply_transform,
     byref_long,
@@ -82,6 +84,91 @@ def _strip_internal(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # Topology listings — the input side of every selection spec
 # --------------------------------------------------------------------------
 
+# Shared schema fragments for list_faces / list_edges (live finding #18: an
+# unbounded listing of a busy part overflowed the client's token limit).
+_PAGING_SCHEMA = {
+    "limit": {
+        "type": "integer", "default": 200, "minimum": 1,
+        "description": "Return at most this many entries (default 200). 'truncated' is true when more matched.",
+    },
+    "offset": {"type": "integer", "default": 0, "minimum": 0, "description": "Skip this many matches first."},
+    "feature": {
+        "type": "string",
+        "description": "Only entities that belong to this named feature (a face of it, or an edge on one of its faces).",
+    },
+    "within_box": {
+        "type": "object",
+        "description": "Only entities whose reported points (point_mm, and start_mm/end_mm for edges) all lie "
+        "inside this box, in mm: {min:[x,y,z], max:[x,y,z]}.",
+        "properties": {
+            "min": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+            "max": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+        },
+        "required": ["min", "max"],
+    },
+}
+
+
+def _same_entity(a: Any, b: Any) -> bool:
+    try:
+        return bool(a == b)
+    except Exception:
+        return False
+
+
+def _feature_entities(doc: Any, name: str, kind: str) -> list[Any]:
+    """Faces of a feature, or the edges bounding them, as live COM objects."""
+    feature = find_feature(doc, name)
+    if feature is None:
+        raise ValueError(f"No feature named '{name}'.")
+    faces = as_list(safe(feature, "GetFaces"))
+    if kind == "faces":
+        return faces
+    edges: list[Any] = []
+    for face in faces:
+        edges.extend(as_list(safe(face, "GetEdges")))
+    return edges
+
+
+def _filter_by_feature(doc: Any, entries: list[dict[str, Any]], name: str, kind: str) -> list[dict[str, Any]]:
+    objects = _feature_entities(doc, name, kind)
+    return [e for e in entries if any(_same_entity(e.get("_obj"), o) for o in objects)]
+
+
+def _box_bounds(box: Any) -> tuple[list[float], list[float]]:
+    if not isinstance(box, dict) or "min" not in box or "max" not in box:
+        raise ValueError("within_box must be {min:[x,y,z], max:[x,y,z]} in mm.")
+    low = [float(c) for c in box["min"]]
+    high = [float(c) for c in box["max"]]
+    if len(low) != 3 or len(high) != 3:
+        raise ValueError("within_box min and max need three numbers each.")
+    # Accept a swapped corner rather than silently matching nothing.
+    return [min(a, b) for a, b in zip(low, high)], [max(a, b) for a, b in zip(low, high)]
+
+
+def _filter_within_box(entries: list[dict[str, Any]], box: Any) -> list[dict[str, Any]]:
+    low, high = _box_bounds(box)
+
+    def inside(entry: dict[str, Any]) -> bool:
+        points = [entry[k] for k in ("point_mm", "start_mm", "end_mm") if entry.get(k)]
+        if not points:
+            return False
+        return all(all(low[i] <= p[i] <= high[i] for i in range(3)) for p in points)
+
+    return [e for e in entries if inside(e)]
+
+
+def _paginate(entries: list[dict[str, Any]], args: dict[str, Any]) -> tuple[list[dict[str, Any]], int, bool]:
+    """Apply limit/offset.  Returns (page, matched_total, truncated)."""
+    raw_limit = args.get("limit")
+    limit = 200 if raw_limit is None else int(raw_limit)
+    offset = max(int(args.get("offset") or 0), 0)
+    if limit < 1:
+        raise ValueError(f"limit must be at least 1 (got {limit}); omit it for the default of 200.")
+    matched = len(entries)
+    page = entries[offset:offset + limit]
+    return page, matched, offset + len(page) < matched
+
 
 @tool(
     "list_faces",
@@ -101,6 +188,7 @@ def _strip_internal(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "description": "Only return planar faces whose normal points this way, e.g. [0,0,1] for up.",
         },
         "tolerance": {"type": "number", "default": 0.02, "description": "Direction tolerance for the normal filter."},
+        **_PAGING_SCHEMA,
     },
 )
 def list_faces(args: dict[str, Any]) -> dict[str, Any]:
@@ -124,12 +212,21 @@ def list_faces(args: dict[str, Any]) -> dict[str, Any]:
             f for f in faces
             if f.get("normal") and abs(sum(a * b for a, b in zip(f["normal"], target)) - 1.0) <= tolerance
         ]
+    if args.get("feature"):
+        faces = _filter_by_feature(doc, faces, str(args["feature"]), "faces")
+    if args.get("within_box"):
+        faces = _filter_within_box(faces, args["within_box"])
 
+    page, matched, truncated = _paginate(faces, args)
     return result(
         True,
-        f"Read {len(faces)} of {total} faces.",
-        faces=_strip_internal(faces),
+        f"Read {len(page)} of {matched} matching faces ({total} in the part)"
+        + (f"; truncated, pass offset={int(args.get('offset') or 0) + len(page)} for more." if truncated else "."),
+        faces=_strip_internal(page),
         total_faces=total,
+        total=matched,
+        truncated=truncated,
+        offset=max(int(args.get("offset") or 0), 0),
     )
 
 
@@ -145,6 +242,7 @@ def list_faces(args: dict[str, Any]) -> dict[str, Any]:
         },
         "min_length_mm": {"type": "number"},
         "max_length_mm": {"type": "number"},
+        **_PAGING_SCHEMA,
     },
 )
 def list_edges(args: dict[str, Any]) -> dict[str, Any]:
@@ -160,7 +258,22 @@ def list_edges(args: dict[str, Any]) -> dict[str, Any]:
     if args.get("max_length_mm") is not None:
         edges = [e for e in edges if e.get("length_mm", 1e18) <= float(args["max_length_mm"])]
 
-    return result(True, f"Read {len(edges)} of {total} edges.", edges=_strip_internal(edges), total_edges=total)
+    if args.get("feature"):
+        edges = _filter_by_feature(doc, edges, str(args["feature"]), "edges")
+    if args.get("within_box"):
+        edges = _filter_within_box(edges, args["within_box"])
+
+    page, matched, truncated = _paginate(edges, args)
+    return result(
+        True,
+        f"Read {len(page)} of {matched} matching edges ({total} in the part)"
+        + (f"; truncated, pass offset={int(args.get('offset') or 0) + len(page)} for more." if truncated else "."),
+        edges=_strip_internal(page),
+        total_edges=total,
+        total=matched,
+        truncated=truncated,
+        offset=max(int(args.get("offset") or 0), 0),
+    )
 
 
 @tool(
@@ -377,10 +490,31 @@ def set_view(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, f"Set the {view} view.", view=view)
 
 
-def _capture_png(doc: Any, width: int) -> bytes:
+_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def screenshot_save_path(save_as: str) -> Path:
+    """OUTPUT_ROOT/screenshots/<name>.png for a bare file name; refuse anything path-like."""
+    name = str(save_as).strip()
+    if not name or "/" in name or "\\" in name or ".." in name or ":" in name or name != Path(name).name:
+        raise ValueError("save_as must be a plain file name (no folders, no '..'); it is saved under the screenshots folder.")
+    if name.split(".")[0].rstrip().upper() in _RESERVED_NAMES:
+        raise ValueError(f"save_as '{name}' is a reserved Windows device name; pick another file name.")
+    if not name.lower().endswith(".png"):
+        name += ".png"
+    return OUTPUT_ROOT / "screenshots" / name
+
+
+def _capture_png(doc: Any, width: int, save_as: str | None = None) -> tuple[bytes, Path | None]:
+    """Returns (png bytes, kept path).  The file is kept only when save_as is given."""
     directory = OUTPUT_ROOT / "screenshots"
+    if save_as:
+        path = screenshot_save_path(save_as)  # validate before touching SOLIDWORKS
+    else:
+        path = directory / f"capture_{time.strftime('%Y%m%d_%H%M%S')}_{int(time.time() * 1000) % 1000}.png"
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"capture_{time.strftime('%Y%m%d_%H%M%S')}_{int(time.time() * 1000) % 1000}.png"
 
     errors, warnings = byref_long(0), byref_long(0)
     saved = False
@@ -397,6 +531,7 @@ def _capture_png(doc: Any, width: int) -> bytes:
         raise RuntimeError("SOLIDWORKS did not write a PNG of the current view.")
 
     data = path.read_bytes()
+    kept: Path | None = path if save_as else None
     try:
         from PIL import Image
 
@@ -411,11 +546,12 @@ def _capture_png(doc: Any, width: int) -> bytes:
     except Exception:
         logger.info("Returning the raw SOLIDWORKS PNG without resizing.")
     finally:
-        try:
-            path.unlink()
-        except OSError:
-            pass
-    return data
+        if not save_as:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    return data, kept
 
 
 @tool(
@@ -431,9 +567,17 @@ def _capture_png(doc: Any, width: int) -> bytes:
         },
         "zoom_to_fit": {"type": "boolean", "default": True},
         "width_px": {"type": "integer", "default": 1100, "minimum": 200, "maximum": 2000},
+        "save_as": {
+            "type": "string",
+            "description": "Optional file name (no folders) to keep the full-resolution PNG as, under "
+            "<output root>/screenshots/. The image is still returned.",
+        },
     },
 )
 def capture_screenshot(args: dict[str, Any]) -> dict[str, Any]:
+    save_as = args.get("save_as") or None
+    if save_as:
+        screenshot_save_path(str(save_as))  # reject a bad name before any view change
     _, doc = active_document()
     view = str(args.get("view", "isometric"))
     clear_selection(doc)
@@ -452,7 +596,8 @@ def capture_screenshot(args: dict[str, Any]) -> dict[str, Any]:
         pass
     time.sleep(0.35)
 
-    data = _capture_png(doc, int(args.get("width_px", 1100)))
-    payload = result(True, f"Captured the {view} view.", view=view, bytes=len(data))
+    data, kept = _capture_png(doc, int(args.get("width_px", 1100)), str(save_as) if save_as else None)
+    extra: dict[str, Any] = {"saved_path": str(kept)} if kept else {}
+    payload = result(True, f"Captured the {view} view." + (f" Saved to {kept}." if kept else ""), view=view, bytes=len(data), **extra)
     payload["_image_png_base64"] = base64.b64encode(data).decode("ascii")
     return payload

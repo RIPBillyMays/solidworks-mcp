@@ -28,8 +28,10 @@ from .sw_core import (
     clear_selection,
     extension,
     flag_methods,
+    as_list,
     iter_features,
     nothing,
+    safe,
     result,
     select_by_id,
     tool,
@@ -54,8 +56,11 @@ def selection_count(doc: Any) -> int:
 @tool(
     "undo",
     "Undo the last N operations in the active document (default 1). Reports the feature count "
-    "before and after, since SOLIDWORKS gives no undo-stack depth. One feature can take several "
-    "undo steps (the sketch un-absorb is a separate step), so check feature_tree_changed.",
+    "before and after, since SOLIDWORKS gives no undo-stack depth. While a sketch is open the "
+    "sketch segment and point counts are compared instead. One feature can take several "
+    "undo steps (the sketch un-absorb is a separate step), so check feature_tree_changed. "
+    "Geometry made by draw_* tools is created outside the undo stack (exact-geometry mode), so "
+    "undo will not remove it: use delete_sketch_segment instead.",
     {"count": {"type": "integer", "minimum": 1, "maximum": 50, "default": 1}},
 )
 def undo(args: dict[str, Any]) -> dict[str, Any]:
@@ -71,9 +76,60 @@ def redo(args: dict[str, Any]) -> dict[str, Any]:
     return _step(args, "EditRedo2", "Redid")
 
 
+def _sketch_counts(doc: Any) -> tuple[int, int] | None:
+    """(segments, points) of the open sketch, or None when no sketch is open."""
+    try:
+        sketch = doc.SketchManager.ActiveSketch
+    except Exception:
+        return None
+    if sketch is None:
+        return None
+    return (
+        len(as_list(safe(sketch, "GetSketchSegments"))),
+        len(as_list(safe(sketch, "GetSketchPoints2"))),
+    )
+
+
+_SKETCH_UNDO_HINT = (
+    " Geometry made by draw_* tools is created outside the undo stack (exact-geometry mode), so "
+    "undo cannot remove it; use delete_sketch_segment instead."
+)
+
+
+def _step_in_sketch(doc: Any, before: tuple[int, int], member: str, verb: str, count: int) -> dict[str, Any]:
+    """Undo/redo inside an open sketch: the feature list never changes there, so
+    judge by the sketch's segment and point counts instead (field finding #14)."""
+    flag_methods(doc, member)
+    getattr(doc, member)(count)
+    after = _sketch_counts(doc)
+    clear_selection(doc)
+    if after is None:
+        # The step closed the sketch (e.g. undoing its creation); the sketch is gone.
+        return result(
+            True, f"{verb} {count} step(s); the sketch is no longer open.",
+            steps=count, in_sketch=True, sketch_open=False,
+            segments_before=before[0], points_before=before[1],
+        )
+    changed = after != before
+    return result(
+        changed,
+        f"{verb} {count} step(s) in the open sketch; segments {before[0]} -> {after[0]}, "
+        f"points {before[1]} -> {after[1]}."
+        if changed else f"SOLIDWORKS refused to {verb.lower().rstrip('d')} {count} step(s) in the sketch (nothing to do?)."
+        + _SKETCH_UNDO_HINT,
+        steps=count, in_sketch=True, sketch_open=True,
+        segments_before=before[0], segments_after=after[0],
+        points_before=before[1], points_after=after[1],
+        sketch_changed=changed,
+    )
+
+
 def _step(args: dict[str, Any], member: str, verb: str) -> dict[str, Any]:
     _, doc = active_document()
     count = max(1, int(args.get("count", 1)))
+    in_sketch = _sketch_counts(doc)
+    if in_sketch is not None:
+        return _step_in_sketch(doc, in_sketch, member, verb, count)
     before = [f["name"] for f in iter_features(doc)]
     flag_methods(doc, member)
     # EditUndo2/EditRedo2 return void (None) on 2017, so success is judged by the tree.

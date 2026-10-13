@@ -79,3 +79,66 @@ Seeded 2026-10-08 from Zach's stated goals and common SOLIDWORKS design-intent p
 - **Applies to:** part
 - **Rule:** Face indices and body names change after each feature. Re-run `list_faces` with a filter (normal, area, point) immediately before every face selection. Never reuse an index from an earlier listing.
 - **Why:** Phase 5 T5: indices moved after the cut, and the body was renamed "CenterHole". *(proposed, 2026-10-10)*
+
+## Field-use candidates (2026-10-12)
+Source: a multi-part build driven from another project (`docs/handoff/2026-10-12-01-mcp-field-findings.md`). All are *proposed*.
+
+### R-012: Shared frame for multi-part products
+- **Enforcement:** soft
+- **Applies to:** assembly
+- **Rule:**
+  - Model every part in place, in one shared product frame.
+  - Insert every component at the assembly origin.
+  - Get mirrored or turned copies with `rotate_component`, not by re-modeling the part.
+- **Why:** In the field build, origin-located inserts landed exactly. That made placement free, and `interference_detection` meaningful.
+
+### R-013: Verify every feature by measurement
+- **Enforcement:** soft (hard candidate)
+- **Applies to:** part
+- **Rule:**
+  - After each feature, compare the volume change (`get_mass_properties`) against a hand calculation.
+  - Check `check_errors`.
+  - Check specific vertices or the bounding box where it matters.
+  - A tool returning ok, or raising no exception, is not proof.
+- **Why:** In the field, volume deltas matched hand calculations on every cut and were the most reliable signal. Silent wrong geometry cost hundreds of calls.
+
+### R-014: Sketch with exact-geometry tools and check the read-back
+- **Enforcement:** soft
+- **Applies to:** part
+- **Rule:**
+  - Prefer `draw_polyline`, `draw_rectangle` and `draw_polygon` over chains of `draw_line`.
+  - Treat `ok:false` with `requested`/`actual` as a hard stop. Don't work around it.
+  - Use `list_sketch_segments` to confirm intent before extruding.
+- **Why:** Sketch snapping in crowded sketches produced wrong profiles that the tools reported as ok. This was fixed 2026-10-12 (field finding #1), but the read-back stays the safety net.
+
+### R-015: Geometry calls are serial; know which document is active
+- **Enforcement:** soft
+- **Applies to:** all
+- **Rule:**
+  - Issue one modeling call at a time.
+  - Read `active_document` in each result. Switch documents with `activate_document`, never by assumption.
+  - Make sure no other client drives SOLIDWORKS at the same time.
+- **Why:** Field reports of the document flipping mid-sequence. The probe found a second client/session active alongside it (2026-10-12).
+
+### R-016: Assembly acceptance needs zero interferences
+- **Enforcement:** soft
+- **Applies to:** assembly
+- **Rule:** An assembly isn't done until `interference_detection` reports 0, or Zach accepts each listed interference.
+- **Why:** In the field it found a real 1 mm sketch error that bounding-box checks missed.
+
+### R-017: Fall back after two failures of an advanced feature
+- **Enforcement:** soft
+- **Applies to:** part
+- **Rule:**
+  - If a loft, variable fillet or other advanced feature fails twice, fall back to a simpler equivalent: extrude + cut, or a uniform fillet.
+  - Record the deviation in the build report for Zach.
+- **Why:** In the field, loft and variable-fillet failures with no detail burned many calls (findings #16, #17).
+
+### R-018: Brief subagents with a resolved numeric spec and the quirks list
+- **Enforcement:** soft
+- **Applies to:** all (orchestrated builds)
+- **Rule:** A modeling subagent's brief contains:
+  - every coordinate and dimension, fully resolved
+  - which sketch axes map to which model axes for the chosen plane (returned by `create_sketch` once #15 lands)
+  - the current known-quirks list
+- **Why:** In the field, adding the quirks list cut a comparable part from about 300 to about 110 calls.

@@ -705,6 +705,17 @@ def rebuild(doc: Any) -> bool:
         return False
 
 
+def rebuild_detail(doc: Any) -> dict[str, Any]:
+    """Like rebuild(), but keep the raw EditRebuild3 return value and any exception text."""
+    try:
+        raw = invoke_no_arg(doc, "EditRebuild3")
+    except Exception as exc:
+        return {"ok": False, "raw": None, "error": f"{type(exc).__name__}: {exc}"}
+    if not isinstance(raw, (bool, int, float, str, type(None))):
+        raw = repr(raw)
+    return {"ok": bool(raw), "raw": raw, "error": None}
+
+
 def clear_selection(doc: Any) -> None:
     try:
         doc.ClearSelection2(True)
@@ -777,6 +788,66 @@ def latest_sketch(doc: Any) -> tuple[str, Any]:
         raise RuntimeError("No sketch was found in the feature tree.")
     feature = sketches[-1]
     return str(feature_property(feature, "Name", "")), feature
+
+
+# Name of the sketch create_sketch / edit_sketch last opened.  Only a fallback
+# for open_sketch_name when COM identity matching cannot decide.
+_OPEN_SKETCH_HINT = ""
+_OPEN_SKETCH_HINT_DOC = ""
+
+
+def _doc_title(doc: Any) -> str:
+    return str(safe(doc, "GetTitle") or "") if doc is not None else ""
+
+
+def set_open_sketch_hint(name: str, doc: Any = None) -> None:
+    """Record the open sketch's name, keyed by document title so it cannot
+    leak into another document."""
+    global _OPEN_SKETCH_HINT, _OPEN_SKETCH_HINT_DOC
+    _OPEN_SKETCH_HINT = str(name or "")
+    _OPEN_SKETCH_HINT_DOC = _doc_title(doc)
+
+
+def same_com_object(a: Any, b: Any) -> bool:
+    """True when two late-bound wrappers refer to the same COM object.
+
+    Every property read can hand back a fresh wrapper, so ``is`` is not enough;
+    win32com's CDispatch compares by underlying interface pointer.
+    """
+    if a is None or b is None:
+        return False
+    if a is b:
+        return True
+    try:
+        return bool(a == b)  # CDispatch.__eq__ compares the underlying interface pointers
+    except Exception:
+        return False
+
+
+def open_sketch_name(doc: Any) -> tuple[str, Any]:
+    """Name and feature of the sketch that is open right now (field finding #7).
+
+    ISketch has no accessor back to its feature, and the open sketch is not
+    always the newest one (edit_sketch reopens an old one), so compare the open
+    ISketch with each sketch feature's GetSpecificFeature2.  If no identity
+    matches, use the name the last create_sketch/edit_sketch recorded, then the
+    newest sketch as before.
+    """
+    active = doc.SketchManager.ActiveSketch
+    sketches = sketch_features(doc)
+    if active is not None:
+        for feature in sketches:
+            try:
+                candidate = value(feature, "GetSpecificFeature2")
+            except Exception:
+                continue
+            if same_com_object(active, candidate):
+                return str(feature_property(feature, "Name", "")), feature
+    if _OPEN_SKETCH_HINT and _OPEN_SKETCH_HINT_DOC == _doc_title(doc):
+        for feature in sketches:
+            if str(feature_property(feature, "Name", "")) == _OPEN_SKETCH_HINT:
+                return _OPEN_SKETCH_HINT, feature
+    return latest_sketch(doc)
 
 
 def resolve_sketch(doc: Any, sketch_name: str | None) -> tuple[str, Any]:
@@ -1236,9 +1307,9 @@ def enumerate_sketch_segments(doc: Any, sketch_name: str | None = None) -> tuple
             raise RuntimeError("The drawing has no active sketch. Activate a view first.")
         resolved_name = "<active drawing view>"
     elif sketch is not None and not sketch_name:
-        # ISketch has no accessor back to its feature in this type library, and
-        # the open sketch is always the newest ProfileFeature in the tree.
-        resolved_name, _ = latest_sketch(doc)
+        # ISketch has no accessor back to its feature in this type library, so
+        # match it by COM identity (the newest sketch is wrong after edit_sketch).
+        resolved_name, _ = open_sketch_name(doc)
     else:
         resolved_name, feature = resolve_sketch(doc, sketch_name)
         sketch = value(feature, "GetSpecificFeature2")
@@ -1662,6 +1733,15 @@ def whats_wrong(doc: Any) -> list[dict[str, Any]]:
             }
         )
     return problems
+
+
+def whats_wrong_split(doc: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """whats_wrong() split into (errors, warnings) by its is_warning flag."""
+    entries = whats_wrong(doc)
+    return (
+        [p for p in entries if not p.get("is_warning")],
+        [p for p in entries if p.get("is_warning")],
+    )
 
 
 def feature_result(doc: Any, feature: Any, action: str, **data: Any) -> dict[str, Any]:

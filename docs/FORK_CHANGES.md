@@ -62,3 +62,42 @@ This is the log of every modification this fork makes to files that came from `S
 - **move_component (2026-10-11):** no behavior change; result adds `requested_origin_mm`, and the warning/description explain that limit mates snap back and only mate-free directions move. See `docs/reports/phase5-move-component.md`.
 - **Sketch fidelity (2026-10-12, field finding #1):** `solidworks_mcp/sw_sketch.py` gains `_sketch_db_mode` (SketchManager.AddToDB on / DisplayWhenAdded off, restored in `finally`, then GraphicsRedraw2) and read-back verification (1 um tolerance) in `draw_line`, `draw_centerline`, `draw_circle`, `draw_rectangle`, `draw_arc`, `draw_3point_arc`, `draw_polygon`; mismatches return `ok:false` with `requested`/`actual` in mm, successes add `actual`/`verified`. New tool `draw_polyline`. Why: sketch inference snapped endpoints/centres in crowded sketches while tools reported ok. Tests: `tests/test_sw2017_sketch_fidelity.py`. See `docs/reports/phase5-fix1-implementation.md`.
 - **Active document in results (2026-10-12, field finding #3):** `sw_core.active_document()` records the title of the document it resolved (`note_active_document`); `result()` (and so `feature_result`) adds a top-level `active_document` key when one was resolved during the call; `server.call_tool` calls `begin_call()` under `COM_LOCK` so nothing leaks between calls. Tools that touch no document are unchanged. New tool `sw_file.activate_document(title)` (ActivateDoc3 + active-title read-back; `ok:false` on no match or a switch that did not happen). Optional `document` argument deferred. Revision 1: `sw_core.stamp_active_document(app)` stamps the document active after the call in `create_new_document`, `open_document`, `activate_document`, `export_components` and `solidworks_mcp/sw_assembly.py` `insert_component` (one import + one call); `begin_call()` is now the first statement of `call_tool`. Not stamped: `open_component`, drawing tools, `close_document` (reports `closed` only). Revision 3 to sketch fidelity: `draw_polygon` computes the corner point itself (2017 ignores the inscribed flag), so `inscribed=false` means radius = apothem. Tests: `tests/test_sw2017_active_document.py`; live: `tests/live_p5_fix1_sketch.py`, `tests/live_p5_fix3_activedoc.py`. See `docs/reports/phase5-fix3-implementation.md`, `phase5-fix-revisions-live.md`.
+- **Feature fixes (2026-10-12, field findings #5, #8, #9, #17):**
+  - **`boss_extrude` / `cut_extrude`:**
+    - New `direction` argument (`+normal` / `-normal`) with the same meaning for both. A table maps it to each feature's Dir/Flip flag.
+    - Results add `direction_vector`, `volume_delta_mm3` and `reversed_automatically`.
+    - An explicit `direction` is never auto-reversed.
+  - **`delete_feature`:**
+    - Clears the selection first.
+    - Prefers an exact name match before a unique case-insensitive one.
+    - Verifies the deletion and returns `deleted`.
+  - **`set_feature_suppression`:** reads `IsSuppressed2` before and after the change, and reports `already` and `side_effects`.
+  - **`fillet_variant type=variable`:** refuses multi-edge chains and `vertex_radii`.
+  - **`fillet`:** reports its option bits. The docs note that 2017 has no tangent-propagation bit.
+  - **Where:** `solidworks_mcp/sw_feature.py`, tests in `tests/test_sw2017_feature_fixes.py`. See `docs/reports/phase5-fixes-feature.md`.
+- **Sketch editing fixes (2026-10-12, field findings #7, #11–#15):**
+  - **`sw_core.open_sketch_name`:** matches the open sketch to its feature by COM identity, then falls back to the name recorded by `create_sketch`/`edit_sketch`, then to the newest sketch. `enumerate_sketch_segments`, `create_sketch` and `close_sketch` use it.
+  - **`create_sketch` / `edit_sketch`:** report `sketch_x_axis`, `sketch_y_axis`, `normal` and `origin`.
+  - **`sketch_fillet`:** accepts `corners`.
+  - **`sketch_offset`:** new `construct_original` option.
+  - **`add_dimension`:** new `anchor` option (a temporary Fixed relation, removed afterwards).
+  - **`undo` / `redo` (`sw_select.py`):** compare sketch segment and point counts while a sketch is open.
+  - **Where:** tests in `tests/test_sw2017_sketch_edit_fixes.py`. See `docs/reports/phase5-fixes-sketch.md`.
+- **File and inspect fixes (2026-10-12, field findings #10, #18, #19, #21):**
+  - **`sw_core`:** adds `rebuild_detail()` and `whats_wrong_split()`. The existing `rebuild()` and `whats_wrong()` are unchanged.
+  - **`rebuild_document`:**
+    - Reports `warnings`, `rebuild_returned` and `rebuild_error`.
+    - Warnings no longer fail it.
+    - Falls back to `ForceRebuild3`.
+  - **`list_faces` / `list_edges`:** new `limit` (default 200), `offset`, `feature` and `within_box` options. Results return `total` and `truncated`.
+  - **`capture_screenshot`:** optional `save_as` keeps the PNG under `OUTPUT_ROOT/screenshots/`.
+  - **`docs/clients.md`:** documents the workflow for CAD kept in another repo, and `SW_MCP_OUTPUT_ROOT`.
+  - **Where:** tests in `tests/test_sw2017_file_inspect_fixes.py`. See `docs/reports/phase5-fixes-file-inspect.md`.
+- **Batch 2 live fixes (2026-10-13; see `docs/reports/phase5-fixes-live.md`):**
+  - **`sw_sketch._temporary_fixed`:**
+    - Identifies the temporary Fixed relation by its type and the anchor coordinates. On 2017, live, COM `==` on relation wrappers is always False.
+    - Verifies removal by the Fixed-type relation count.
+    - Skips the temporary relation when the anchor point is already Fixed.
+  - **New tool `delete_sketch_segment`:** the replacement for undo of draw_* geometry. Exact-geometry mode, AddToDB, bypasses the undo stack. Zach chose option A on 2026-10-13.
+  - **`sw_select.undo`:** the description, and the result when nothing changed inside a sketch, explain the undo limit and point to `delete_sketch_segment`.
+  - **`sw_file.rebuild_document(force_all)`:** reads `ForceRebuildAll` as a property, because it is one on 2017. Calling it raised TypeError.

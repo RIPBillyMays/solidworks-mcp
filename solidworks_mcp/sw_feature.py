@@ -27,6 +27,9 @@ import math
 import re
 from typing import Any, Final, Sequence
 
+import pythoncom
+import win32com.client
+
 from .sw_core import (
     active_document,
     apply_selection,
@@ -53,6 +56,7 @@ from .sw_core import (
     FILLET_TYPE_SIMPLE,
     FILLET_UNIFORM_RADIUS,
     find_feature,
+    flag_methods,
     get_bodies,
     iter_face_objects,
     iter_features,
@@ -311,6 +315,111 @@ class _ExtrudePlan:
         return info
 
 
+# --------------------------------------------------------------------------
+# Extrude direction convention (field finding #5)
+# --------------------------------------------------------------------------
+
+DIRECTIONS: Final = ("+normal", "-normal")
+
+# What SOLIDWORKS 2017 does with the "reverse" (Dir) flag at its defaults, observed live on a
+# +Z-facing sketch plane: a boss goes +Z (along the sketch normal) and a cut goes -Z (into the
+# material, against the normal).  The two feature types therefore need opposite flags to act
+# the same way.  Keys are (kind, direction); values are the Dir flag to pass.
+DIRECTION_REVERSE_FLAG: Final = {
+    ("boss", "+normal"): False,
+    ("boss", "-normal"): True,
+    ("cut", "+normal"): True,
+    ("cut", "-normal"): False,
+}
+
+_DIRECTION_SCHEMA = {
+    "type": "string",
+    "enum": list(DIRECTIONS),
+    "description": (
+        "Which way the first direction extrudes relative to the sketch plane's normal: +normal is "
+        "along it, -normal is against it. Means the same for a boss and a cut (SOLIDWORKS' own "
+        "defaults differ: a boss goes +normal, a cut goes -normal). Do not combine with reverse. "
+        "Ignored for mid_plane / through_all_both, which are symmetric. With a second direction, "
+        "that one goes the opposite way. The result reports direction_vector (model coordinates) "
+        "and volume_delta_mm3 so the effect can be checked."
+    ),
+}
+
+_REVERSE_SCHEMA = {
+    "type": "boolean",
+    "description": (
+        "Raw SOLIDWORKS reverse flag (a boss reverses to -normal, a cut reverses to +normal). "
+        "Prefer direction; giving both is an error."
+    ),
+}
+
+
+def resolve_extrude_direction(kind: str, args: dict[str, Any]) -> tuple[bool, str | None]:
+    """Return (Dir flag, explicit direction or None) for a boss ("boss") or cut ("cut")."""
+    direction = args.get("direction")
+    if direction is None:
+        return bool(args.get("reverse", False)), None
+    if direction not in DIRECTIONS:
+        raise RuntimeError(f"direction must be one of {list(DIRECTIONS)}, not {direction!r}.")
+    if args.get("reverse") is not None:
+        raise RuntimeError(
+            "Give either direction or reverse, not both: direction ('+normal'/'-normal') is the "
+            "same for boss and cut, while reverse is the raw flag with opposite meanings."
+        )
+    return DIRECTION_REVERSE_FLAG[(kind, str(direction))], str(direction)
+
+
+def along_normal(kind: str, reverse: bool) -> bool:
+    """True when the Dir flag sends the first direction along the sketch plane's normal."""
+    return reverse == (kind == "cut")
+
+
+def _sketch_plane_normal(app: Any, doc: Any, sketch_name: str) -> list[float] | None:
+    """The sketch plane's unit normal in model coordinates, or None when unreadable.
+
+    ISketch.ModelToSketchTransform maps model to sketch space, so its inverse maps the sketch's
+    origin and its +Z point back into the model.  Transforming two points with IMathPoint is
+    unambiguous, unlike picking rows or columns out of IMathTransform.ArrayData.
+    """
+    try:
+        feature = find_feature(doc, sketch_name)
+        sketch = value(feature, "GetSpecificFeature2")
+        inverse = value(value(sketch, "ModelToSketchTransform"), "Inverse")
+        util = value(app, "GetMathUtility")
+        moved = []
+        for z in (0.0, 1.0):
+            point = flag_methods(util, "CreatePoint").CreatePoint(double_array([0.0, 0.0, z]))
+            image = flag_methods(point, "MultiplyTransform").MultiplyTransform(inverse)
+            moved.append([float(c) for c in value(image, "ArrayData")][:3])
+        vec = [b - a for a, b in zip(*moved)]
+        length = math.sqrt(sum(c * c for c in vec))
+        return [round(c / length, 6) for c in vec] if length > 1e-9 else None
+    except Exception:
+        logger.info("Could not read the sketch plane normal of %s", sketch_name)
+        return None
+
+
+def _direction_report(
+    app: Any, doc: Any, sketch_name: str, kind: str, reverse: bool, plan: "_ExtrudePlan"
+) -> dict[str, Any]:
+    """direction / direction_vector fields for an extrude or cut result."""
+    if plan.name1 in ("mid_plane", "through_all_both"):
+        return {"direction": "symmetric", "direction_vector": None}
+    forward = along_normal(kind, reverse)
+    normal = _sketch_plane_normal(app, doc, sketch_name)
+    vector = None if normal is None else [round(c if forward else -c, 6) for c in normal]
+    return {"direction": "+normal" if forward else "-normal", "direction_vector": vector}
+
+
+def _add_volume_delta(payload: dict[str, Any], doc: Any, before: float | None) -> None:
+    after = _volume_mm3(doc)
+    if before is None and after is not None:
+        # No solid body existed before the feature (first boss), so there was no volume to read.
+        before = 0.0
+    delta = round(after - before, 4) if before is not None and after is not None else None
+    payload.setdefault("data", {}).update(volume_before_mm3=before, volume_after_mm3=after, volume_delta_mm3=delta)
+
+
 _NO_START_OFFSET = (0, 0.0, False)  # T0 = blind start from the sketch plane
 
 
@@ -319,7 +428,9 @@ _NO_START_OFFSET = (0, 0.0, False)  # T0 = blind start from the sketch plane
     "Extrude a sketch into a solid boss. Depth is millimetres, draft is degrees. Supports every end "
     "condition (blind, through_all, through_all_both, through_next, up_to_vertex, up_to_surface, "
     "offset_from_surface, up_to_body, mid_plane); name the stop entity with target. Optional second "
-    "direction (end_condition2, depth2_mm, draft2_deg, target2) and thin feature.",
+    "direction (end_condition2, depth2_mm, draft2_deg, target2) and thin feature. Direction convention: "
+    "direction=+normal extrudes along the sketch plane's normal, -normal against it (same meaning as "
+    "cut_extrude; the default with neither direction nor reverse is +normal).",
     {
         "depth_mm": {"type": "number", "exclusiveMinimum": 0, "default": 10,
                      "description": "Depth; for offset_from_surface this is the offset distance."},
@@ -327,7 +438,8 @@ _NO_START_OFFSET = (0, 0.0, False)  # T0 = blind start from the sketch plane
         "end_condition": _END_CONDITION_SCHEMA,
         "target": _TARGET_SCHEMA,
         "offset_reverse": {"type": "boolean", "default": False, "description": "Flip the surface offset direction."},
-        "reverse": {"type": "boolean", "default": False, "description": "Extrude the other way."},
+        "direction": _DIRECTION_SCHEMA,
+        "reverse": _REVERSE_SCHEMA,
         "end_condition2": _END_CONDITION2_SCHEMA,
         "depth2_mm": {"type": "number", "exclusiveMinimum": 0},
         "target2": _TARGET_SCHEMA,
@@ -342,12 +454,15 @@ _NO_START_OFFSET = (0, 0.0, False)  # T0 = blind start from the sketch plane
     },
 )
 def boss_extrude(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_part()
+    app, doc = require_part()
     plan = _ExtrudePlan(args)
+    reverse, _ = resolve_extrude_direction("boss", args)
+    volume_before = _volume_mm3(doc)
     sketch = select_sketch_for_feature(doc, args.get("sketch_name"))
     plan.select_targets(doc)
     merge = bool(args.get("merge", True))
-    head = plan.head(False, bool(args.get("reverse", False)))
+    head = plan.head(False, reverse)
+    report = _direction_report(app, doc, sketch, "boss", reverse, plan)
 
     with dialogs_suppressed():
         if plan.thin:
@@ -364,22 +479,30 @@ def boss_extrude(args: dict[str, Any]) -> dict[str, Any]:
                 *_NO_START_OFFSET,
             )
     rename_feature(feature, args.get("name"))
-    return feature_result(
-        doc, feature, "boss extrusion", sketch=sketch, depth_mm=args.get("depth_mm", 10), **plan.describe()
+    payload = feature_result(
+        doc, feature, "boss extrusion", sketch=sketch, depth_mm=args.get("depth_mm", 10), **plan.describe(), **report
     )
+    _add_volume_delta(payload, doc, volume_before)
+    return payload
 
 
 @tool(
     "cut_extrude",
     "Cut material using a sketch profile. Depth is millimetres, draft is degrees. Same end conditions, "
-    "target, second direction and thin options as boss_extrude; flip_side cuts outside the profile.",
+    "target, second direction and thin options as boss_extrude; flip_side cuts outside the profile. "
+    "direction=+normal cuts along the sketch plane's normal, -normal against it (same meaning as "
+    "boss_extrude; SOLIDWORKS' own cut default is -normal, so with neither direction nor reverse a "
+    "cut goes -normal and retries +normal automatically if that removes nothing; an explicit "
+    "direction is never retried). The result reports reversed_automatically, direction_vector "
+    "and volume_delta_mm3.",
     {
         "depth_mm": {"type": "number", "exclusiveMinimum": 0, "default": 10},
         "sketch_name": _SKETCH_ARG,
         "end_condition": _END_CONDITION_SCHEMA,
         "target": _TARGET_SCHEMA,
         "offset_reverse": {"type": "boolean", "default": False},
-        "reverse": {"type": "boolean", "default": False},
+        "direction": _DIRECTION_SCHEMA,
+        "reverse": _REVERSE_SCHEMA,
         "flip_side": {"type": "boolean", "default": False, "description": "Cut everything outside the profile instead."},
         "end_condition2": _END_CONDITION2_SCHEMA,
         "depth2_mm": {"type": "number", "exclusiveMinimum": 0},
@@ -394,10 +517,11 @@ def boss_extrude(args: dict[str, Any]) -> dict[str, Any]:
     },
 )
 def cut_extrude(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_part()
+    app, doc = require_part()
     plan = _ExtrudePlan(args)
     flip_side = bool(args.get("flip_side", False))
-    requested = bool(args.get("reverse", False))
+    requested, explicit_direction = resolve_extrude_direction("cut", args)
+    volume_before = _volume_mm3(doc)
 
     def attempt(reverse: bool) -> tuple[str, Any]:
         name = select_sketch_for_feature(doc, args.get("sketch_name"))
@@ -427,20 +551,29 @@ def cut_extrude(args: dict[str, Any]) -> dict[str, Any]:
     with dialogs_suppressed():
         sketch, feature = attempt(requested)
         reversed_automatically = False
-        if feature is None:
+        if feature is None and explicit_direction is None:
             # Which way "forward" points depends on the sketch plane's orientation,
             # and a sketch lying on a boundary face of the body cuts into thin air.
             # A cut that removes nothing is unambiguous, so try the other way.
+            # An explicit direction is the caller's intent, so it is never retried.
             sketch, feature = attempt(not requested)
             reversed_automatically = feature is not None
 
+    effective_reverse = requested != reversed_automatically
     rename_feature(feature, args.get("name"))
     payload = feature_result(
-        doc, feature, "cut", sketch=sketch, depth_mm=args.get("depth_mm", 10), **plan.describe()
+        doc, feature, "cut", sketch=sketch, depth_mm=args.get("depth_mm", 10), **plan.describe(),
+        reversed_automatically=reversed_automatically,
+        **_direction_report(app, doc, sketch, "cut", effective_reverse, plan),
     )
+    _add_volume_delta(payload, doc, volume_before)
     if reversed_automatically:
-        payload["data"]["reversed_automatically"] = True
         payload["message"] += " The requested direction removed nothing, so it was cut the other way."
+    elif feature is None and explicit_direction is not None:
+        payload["message"] += (
+            f" direction '{explicit_direction}' removed nothing and was not retried the other way: "
+            "check that the profile overlaps the body on that side."
+        )
     elif feature is None:
         payload["message"] += (
             " Neither direction removed material: check that the profile actually overlaps the body."
@@ -530,11 +663,16 @@ def revolve(args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "fillet",
     "Round the selected edges or faces with a constant radius, in millimetres. "
-    "Use list_edges to find the edge indices, or selection.face_edges to fillet every edge of a face.",
+    "Use list_edges to find the edge indices, or selection.face_edges to fillet every edge of a face. "
+    "propagate=true adds swFeatureFilletPropagate (continue along tangent edges); propagate=false passes "
+    "only the uniform-radius bit. SOLIDWORKS 2017 has no separate tangent-propagation bit, so with "
+    "propagate=false SOLIDWORKS may still carry the fillet onto tangent-adjacent edges (observed once; "
+    "needs live verification). Select every edge you want explicitly and check the result's "
+    "fillet_options.",
     {
         "radius_mm": {"type": "number", "exclusiveMinimum": 0},
         "selection": SELECTION_SCHEMA,
-        "propagate": {"type": "boolean", "default": True, "description": "Continue across tangent faces."},
+        "propagate": {"type": "boolean", "default": True, "description": "Continue across tangent faces (swFeatureFilletPropagate=1, the only propagate bit in 2017)."},
         "keep_features": {"type": "boolean", "default": False},
         "name": {"type": "string"},
     },
@@ -555,7 +693,10 @@ def fillet(args: dict[str, Any]) -> dict[str, Any]:
         empty_variant(), empty_variant(), empty_variant(), empty_variant(),
     )
     rename_feature(feature, args.get("name"))
-    return feature_result(doc, feature, "fillet", radius_mm=args["radius_mm"], entities=count)
+    return feature_result(
+        doc, feature, "fillet", radius_mm=args["radius_mm"], entities=count,
+        fillet_options=options, propagate=bool(options & FILLET_PROPAGATE),
+    )
 
 
 @tool(
@@ -1030,33 +1171,78 @@ def mirror_feature(args: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
+def _resolve_features(doc: Any, names: Sequence[str]) -> tuple[list[tuple[str, Any]], str | None]:
+    """Map requested names to (actual name, feature), exact match first.
+
+    A name that is not an exact match is accepted only if it matches exactly one feature
+    case- and whitespace-insensitively; an ambiguous or unknown name is an error, never a guess.
+    """
+    features = [(str(feature_property(f, "Name", "")), f) for f in iter_feature_objects(doc)]
+    resolved: list[tuple[str, Any]] = []
+    for name in names:
+        exact = [(n, f) for n, f in features if n == name]
+        if not exact:
+            loose = [(n, f) for n, f in features if n.strip().lower() == name.strip().lower()]
+            if len(loose) > 1:
+                return [], f"'{name}' matches several features ({[n for n, _ in loose]}); use the exact name."
+            exact = loose
+        if not exact:
+            return [], f"No feature named '{name}' exists in this document."
+        if exact[0][0] not in [n for n, _ in resolved]:
+            resolved.append(exact[0])
+    return resolved, None
+
+
 @tool(
     "delete_feature",
-    "Delete named features from the feature tree, together with anything that depends on them.",
+    "Delete named features from the feature tree, together with anything that depends on them. "
+    "Names match exactly (a unique case-insensitive match is accepted). The selection is cleared "
+    "first so nothing else is deleted by accident, and the result is verified: data.deleted lists "
+    "every feature that disappeared with its type, data.also_deleted the ones that were not "
+    "requested (dependents). Fails if a requested feature is still there afterwards.",
     {"feature_names": {"type": "array", "items": {"type": "string"}, "minItems": 1}},
     ["feature_names"],
 )
 def delete_feature(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = active_document()
     exit_active_sketch(doc)
-    clear_selection(doc)
-    names = [str(name) for name in args["feature_names"]]
+    resolved, problem = _resolve_features(doc, [str(n) for n in args["feature_names"]])
+    if problem:
+        return result(False, problem)
+    before = iter_features(doc)
+    # Select2(True, ...) appends to whatever an earlier tool left selected, and that is
+    # what deleted the wrong sketch in the field.  Start from an empty selection and
+    # append only after the first pick.
+    doc.ClearSelection2(True)
     selected: list[str] = []
-    for name in names:
-        feature = find_feature(doc, name)
-        if feature is None:
-            return result(False, f"No feature named '{name}' exists in this document.")
-        if bool(selectable(feature).Select2(True, 0)):
+    for name, feature in resolved:
+        if bool(selectable(feature).Select2(bool(selected), 0)):
             selected.append(name)
-    if not selected:
-        return result(False, "Could not select any of the named features.")
-    deleted = bool(extension(doc).DeleteSelection2(0))
+    if len(selected) != len(resolved):
+        clear_selection(doc)
+        return result(False, "Could not select every named feature; nothing was deleted.", selected=selected)
+    ok_call = bool(extension(doc).DeleteSelection2(0))
     rebuild(doc)
     clear_selection(doc)
+    after = iter_features(doc)
+    remaining = {f["name"] for f in after}
+    gone = [f for f in before if f["name"] not in remaining]
+    requested_names = {n for n, _ in resolved}
+    still_there = [n for n in requested_names if n in remaining]
+    also = [f for f in gone if f["name"] not in requested_names]
+    ok = ok_call and not still_there and len(before) - len(after) >= len(requested_names)
+    if ok:
+        message = f"Deleted {len(gone)} feature(s)."
+        if also:
+            message += f" {len(also)} dependent feature(s) went with them."
+    elif still_there:
+        message = f"Feature(s) {sorted(still_there)} still exist after the delete; check dependents or a refused dialog."
+    else:
+        message = "SOLIDWORKS refused to delete the selection."
     return result(
-        deleted,
-        f"Deleted {len(selected)} features." if deleted else "SOLIDWORKS refused to delete the selection.",
-        deleted=selected,
+        ok, message,
+        deleted=gone, also_deleted=also, still_present=still_there,
+        feature_count_before=len(before), feature_count_after=len(after),
     )
 
 
@@ -1075,9 +1261,40 @@ def rename_feature_tool(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, f"Renamed to '{args['new_name']}'.", feature=str(args["new_name"]))
 
 
+def _string_array(names: Sequence[str]) -> Any:
+    return win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_BSTR, tuple(str(n) for n in names))
+
+
+def _active_config_name(doc: Any) -> str:
+    config = safe(doc, "GetActiveConfiguration")
+    return str(safe(config, "Name", "") or "") if config is not None else ""
+
+
+def _is_suppressed(doc: Any, feature: Any) -> bool | None:
+    """Suppression state of a feature in the active configuration, or None if unreadable.
+
+    GetSuppression2 does not exist in 2017.  IsSuppressed2(swSpecifyConfiguration, names)
+    returns one flag per configuration name; the argument-taking member must be flagged as a
+    method so late binding does not evaluate it with no arguments.
+    """
+    config = _active_config_name(doc)
+    try:
+        flags = as_list(flag_methods(feature, "IsSuppressed2").IsSuppressed2(3, _string_array([config])))
+        if flags:
+            return bool(flags[0])
+    except Exception:
+        pass
+    state = safe(feature, "IsSuppressed")
+    return None if state is None else bool(state)
+
+
 @tool(
     "set_feature_suppression",
-    "Suppress or unsuppress named features.",
+    "Suppress or unsuppress named features. The state is read before and after: a feature that is "
+    "already in the target state is reported (data.already_in_state) and counts as success; "
+    "data.changed lists the ones that actually changed and data.side_effects any other features "
+    "(children) whose state changed with them. Fails only when a feature's final state does not "
+    "match the request.",
     {
         "feature_names": {"type": "array", "items": {"type": "string"}, "minItems": 1},
         "suppressed": {"type": "boolean", "default": True},
@@ -1087,26 +1304,63 @@ def rename_feature_tool(args: dict[str, Any]) -> dict[str, Any]:
 def set_feature_suppression(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = active_document()
     exit_active_sketch(doc)
-    suppressed = bool(args.get("suppressed", True))
-    changed: list[str] = []
-    for name in args["feature_names"]:
-        feature = find_feature(doc, str(name))
-        if feature is None:
-            return result(False, f"No feature named '{name}' exists in this document.")
+    target = bool(args.get("suppressed", True))
+    resolved, problem = _resolve_features(doc, [str(n) for n in args["feature_names"]])
+    if problem:
+        return result(False, problem)
+    requested = [n for n, _ in resolved]
+
+    def snapshot() -> dict[str, bool | None]:
+        # Children always sit after their parent, so only the tail of the tree can change.
+        names = [str(feature_property(f, "Name", "")) for f in iter_feature_objects(doc)]
+        first = min(names.index(n) for n in requested if n in names)
+        return {
+            str(feature_property(f, "Name", "")): _is_suppressed(doc, f)
+            for f in iter_feature_objects(doc)[first:]
+        }
+
+    before = snapshot()
+    already: list[str] = []
+    acted: list[str] = []
+    for name, feature in resolved:
+        if before.get(name) is target:
+            already.append(name)
+            continue
         clear_selection(doc)
         if not bool(selectable(feature).Select2(False, 0)):
-            return result(False, f"Could not select feature '{name}'.")
+            return result(False, f"Could not select feature '{name}'.", changed=acted, already_in_state=already)
         # These take no arguments, and pywin32 may already have evaluated them
         # on attribute access, so go through value() rather than calling.
-        ok = bool(value(doc, "EditSuppress2" if suppressed else "EditUnsuppress2"))
-        if ok:
-            changed.append(str(name))
+        if bool(value(doc, "EditSuppress2" if target else "EditUnsuppress2")):
+            acted.append(name)
     rebuild(doc)
     clear_selection(doc)
+    after = snapshot()
+
+    changed, mismatched, unverified = [], [], []
+    for name in requested:
+        state = after.get(name)
+        if state is None:
+            # State unreadable: trust the API's own return value.
+            (unverified if name in acted else mismatched).append(name)
+        elif state is not target:
+            mismatched.append(name)
+        elif name not in already:
+            changed.append(name)
+    side_effects = [
+        {"name": n, "suppressed": st}
+        for n, st in after.items()
+        if n not in requested and before.get(n) is not None and st is not None and st != before[n]
+    ]
+    ok = not mismatched
+    verb = "suppressed" if target else "unsuppressed"
+    message = f"{len(changed) + len(unverified)} feature(s) {verb}, {len(already)} already {verb}."
+    if mismatched:
+        message = f"Feature(s) {mismatched} did not end up {verb}."
     return result(
-        bool(changed),
-        f"{'Suppressed' if suppressed else 'Unsuppressed'} {len(changed)} features.",
-        changed=changed,
+        ok, message,
+        changed=changed + unverified, already_in_state=already, already=bool(already) and len(already) == len(requested),
+        mismatched=mismatched, unverified=unverified, side_effects=side_effects,
         problems=whats_wrong(doc),
     )
 
@@ -1415,10 +1669,20 @@ def cosmetic_thread(args: dict[str, Any]) -> dict[str, Any]:
     return feature_result(doc, feature, "cosmetic thread", size=args["size"])
 
 
+_VARIABLE_CHAIN_MESSAGE = (
+    "A variable-radius fillet needs a single edge ({count} selected): the start/end radii in the Radii "
+    "array describe one edge, and per-vertex radii for a chain are not supported on 2017. Fillet each "
+    "edge with its own fillet_variant call (use propagate=false so tangent neighbours are not pulled "
+    "in), or use fillet for a constant radius."
+)
+
+
 @tool(
     "fillet_variant",
     "Fillet types beyond the constant-radius edge fillet. variable: selection.edges plus "
-    "radius_mm (start) and end_radius_mm. face: face_set_1 and face_set_2 (selection specs with "
+    "radius_mm (start) and end_radius_mm, for ONE edge only (the Radii array holds just a start and "
+    "an end radius; chains of several edges are refused, call per edge, with propagate=false so a "
+    "tangent chain is not pulled in). face: face_set_1 and face_set_2 (selection specs with "
     "faces) plus radius_mm. full_round is NOT SUPPORTED ON SOLIDWORKS 2017 and is "
     "refused (FeatureFillet3 builds a plain fillet; CreateDefinition(1) returns Nothing).",
     {
@@ -1448,7 +1712,16 @@ def fillet_variant(args: dict[str, Any]) -> dict[str, Any]:
     if kind == "variable":
         if radius is None or args.get("end_radius_mm") is None or not args.get("selection"):
             return result(False, "type=variable needs selection (edges), radius_mm and end_radius_mm.")
-        require_selection(doc, args["selection"])
+        if args.get("vertex_radii") is not None:
+            return result(False, "vertex_radii is not supported: the FeatureFillet3 Radii layout for several "
+                          "vertices is not documented for 2017. Use one call per edge.")
+        edge_count = len((args["selection"] or {}).get("edges") or [])
+        if edge_count > 1:
+            return result(False, _VARIABLE_CHAIN_MESSAGE.format(count=edge_count))
+        selected = require_selection(doc, args["selection"])
+        if selected > 1:
+            clear_selection(doc)
+            return result(False, _VARIABLE_CHAIN_MESSAGE.format(count=selected))
         options |= FILLET_OPT_VARIABLE_RADIUS
         ftype = FILLET_TYPE_VARIABLE
         # Live 2017: the start/end radii go in the Radii argument (PointRadiusArray built nothing).
