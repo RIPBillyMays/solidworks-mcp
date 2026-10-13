@@ -49,16 +49,25 @@ from mcp.server.stdio import stdio_server
 from mcp.types import ImageContent, TextContent, Tool
 
 from . import sw_core
-from .sw_core import HANDLERS, TOOLS, com_error, logger, result
+from .sw_core import HANDLERS, TOOLS, begin_call, com_error, logger, result
 
 # Importing these modules is what registers their tools into sw_core.TOOLS.
 from . import sw_file  # noqa: F401
 from . import sw_refgeom  # noqa: F401
 from . import sw_sketch  # noqa: F401
 from . import sw_feature  # noqa: F401
+from . import sw_select  # noqa: F401
+from . import sw_body  # noqa: F401
+from . import sw_docdata  # noqa: F401
 from . import sw_inspect  # noqa: F401
 from . import sw_assembly  # noqa: F401
 from . import sw_drawing  # noqa: F401
+from . import sw_mates_adv  # noqa: F401
+from . import sw_asm_pattern  # noqa: F401
+from . import sw_sheetmetal  # noqa: F401
+from . import sw_thread  # noqa: F401
+from . import sw_surface  # noqa: F401
+from . import sw_edit  # noqa: F401
 from . import sw_demo  # noqa: F401
 from .sw2017_fences import apply_fences
 
@@ -78,11 +87,13 @@ async def list_tools() -> list[Tool]:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent | ImageContent]:
+    begin_call()  # first thing: no title may leak, even into an unknown-tool result
     handler = HANDLERS.get(name)
     if handler is None:
         payload: dict[str, Any] = result(False, f"Unknown tool: {name}")
     else:
         async with COM_LOCK:
+            begin_call()  # again under the lock: another call may have run while waiting
             try:
                 payload = handler(arguments or {})
             except RuntimeError as exc:

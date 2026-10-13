@@ -215,10 +215,40 @@ def tool(
 # --------------------------------------------------------------------------
 
 
+# Title of the document the current tool call resolved via active_document().
+# Field users could not tell which document a result came from after a
+# document switch, so result() stamps it on the envelope.  The server resets
+# it per call (begin_call) so a stale title can never leak between calls.
+_call_document_title: str | None = None
+
+
+def begin_call() -> None:
+    """Forget the document title recorded by a previous tool call."""
+    global _call_document_title
+    _call_document_title = None
+
+
+def note_active_document(title: str | None) -> None:
+    """Record the document the running tool call operated on."""
+    global _call_document_title
+    _call_document_title = str(title) if title else None
+
+
+def stamp_active_document(app: Any) -> None:
+    """Record whichever document is active now (for tools that open/switch documents)."""
+    try:
+        doc = app.ActiveDoc
+        note_active_document(value(doc, "GetTitle") if doc is not None else None)
+    except Exception:
+        note_active_document(None)
+
+
 def result(ok: bool, message: str, **data: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {"ok": ok, "message": message}
     if data:
         payload["data"] = data
+    if _call_document_title:
+        payload["active_document"] = _call_document_title
     return payload
 
 
@@ -327,7 +357,7 @@ def flag_methods(obj: Any, *names: str) -> Any:
         except Exception:
             # Deliberately not logging the object: repr() on a COM proxy can
             # itself dispatch, and this runs on the failure path.
-            if name in _DOCUMENT_SPECIFIC_METHODS:
+            if name in _DOCUMENT_SPECIFIC_METHODS or name in _registered(*_DOC_INTERFACES):
                 logger.debug("'%s' is not exposed by this object, as expected.", name)
             elif name not in _UNFLAGGABLE_NAMES:
                 _UNFLAGGABLE_NAMES.add(name)
@@ -385,16 +415,49 @@ _MODEL_DOC_METHODS = (
 _APP_METHODS = ("NewDocument", "OpenDoc6", "ActivateDoc3", "CloseDoc", "GetUserPreferenceStringValue")
 
 
+# Per-module additions to the lists above (ADR-0007).  Fork modules declare the
+# members they call with arguments at import time, so parallel work never edits
+# the shared tuples.  Keyed by the interface the member lives on.
+_REGISTERED_FLAGS: dict[str, list[str]] = {}
+_DOC_INTERFACES = ("IModelDoc2", "IPartDoc", "IAssemblyDoc", "IDrawingDoc")
+
+
+def register_flag_methods(interface: str, names: Iterable[str]) -> None:
+    """Declare member names of ``interface`` that must be flagged as methods.
+
+    Idempotent and order-preserving; the built-in tuples are never modified.
+    ``interface`` is one of ISketchManager, IFeatureManager, IModelDocExtension
+    or a document interface (IModelDoc2/IPartDoc/IAssemblyDoc/IDrawingDoc);
+    document-interface names are offered to every document, like
+    ``_MODEL_DOC_METHODS``, and their absence on other document types is quiet.
+    """
+    if isinstance(names, str):
+        names = (names,)
+    bucket = _REGISTERED_FLAGS.setdefault(interface, [])
+    for name in names:
+        if name not in bucket:
+            bucket.append(name)
+
+
+def _registered(*interfaces: str) -> tuple[str, ...]:
+    out: list[str] = []
+    for interface in interfaces:
+        for name in _REGISTERED_FLAGS.get(interface, ()):
+            if name not in out:
+                out.append(name)
+    return tuple(out)
+
+
 def sketch_manager(doc: Any) -> Any:
-    return flag_methods(doc.SketchManager, *_SKETCH_MANAGER_METHODS)
+    return flag_methods(doc.SketchManager, *_SKETCH_MANAGER_METHODS, *_registered("ISketchManager"))
 
 
 def feature_manager(doc: Any) -> Any:
-    return flag_methods(doc.FeatureManager, *_FEATURE_MANAGER_METHODS)
+    return flag_methods(doc.FeatureManager, *_FEATURE_MANAGER_METHODS, *_registered("IFeatureManager"))
 
 
 def extension(doc: Any) -> Any:
-    return flag_methods(doc.Extension, *_EXTENSION_METHODS)
+    return flag_methods(doc.Extension, *_EXTENSION_METHODS, *_registered("IModelDocExtension"))
 
 
 def selectable(obj: Any) -> Any:
@@ -512,12 +575,95 @@ def dimension_dialog_suppressed(app: Any) -> Iterator[None]:
                 logger.info("Could not restore the SOLIDWORKS dimension-input dialog setting.")
 
 
+# Toggles that can raise a modal box while a feature is being built or rebuilt:
+# swInputDimValOnCreate (10) and swShowErrorsEveryRebuild (77).  Feature APIs
+# run a rebuild, and a rebuild error dialog blocks the COM call forever.
+FEATURE_DIALOG_TOGGLES = (10, 77)
+
+
+@contextmanager
+def dialogs_suppressed(app: Any = None, toggles: Sequence[int] = FEATURE_DIALOG_TOGGLES) -> Iterator[None]:
+    """Generic form of ``dimension_dialog_suppressed``: switch several dialog
+    toggles off for the duration of a block and restore each one afterwards.
+
+    Each toggle is handled independently, so a build that rejects one still
+    gets the others suppressed.  Never raises on the way in or out.
+    """
+    if app is None:
+        try:
+            app = running_app()
+        except Exception:
+            app = None
+    saved: dict[int, bool] = {}
+    if app is not None:
+        for toggle in toggles:
+            try:
+                previous = bool(app.GetUserPreferenceToggle(toggle))
+                app.SetUserPreferenceToggle(toggle, False)
+                saved[toggle] = previous
+            except Exception:
+                logger.info("Could not suppress SOLIDWORKS dialog toggle %s.", toggle)
+    try:
+        yield
+    finally:
+        for toggle, previous in saved.items():
+            try:
+                app.SetUserPreferenceToggle(toggle, previous)
+            except Exception:
+                logger.info("Could not restore SOLIDWORKS dialog toggle %s.", toggle)
+
+
+@contextmanager
+def feature_data(feature: Any, doc: Any) -> Iterator[Any]:
+    """Guarded feature-definition edit (ADR-0007 decision 4).
+
+    ``GetDefinition`` -> ``AccessSelections(doc, None)`` -> yield the data for
+    the caller to edit -> ``ModifyDefinition(data, doc, None)`` on a normal exit.
+    ``ReleaseSelectionAccess`` always runs once access was taken, even when the
+    caller raised (ModifyDefinition is then skipped), because leaving a feature
+    in selection-access state hangs SOLIDWORKS like a modal.  Raises
+    RuntimeError if there is no definition, access is refused, or
+    ModifyDefinition reports failure.  The caller must still verify by
+    read-back: ModifyDefinition can return True and change nothing.
+    """
+    data = value(feature, "GetDefinition")  # PROPGET on 2017: calling it raises Member not found
+    if data is None:
+        raise RuntimeError("Feature has no editable definition.")
+    accessed = False
+    try:
+        try:
+            accessed = bool(data.AccessSelections(doc, nothing()))
+        except Exception:
+            # The call may have half-taken access before failing; release defensively.
+            _release_selection_access(data)
+            raise
+        if not accessed:
+            raise RuntimeError("SOLIDWORKS refused selection access for this feature.")
+        yield data
+        if not feature.ModifyDefinition(data, doc, nothing()):
+            raise RuntimeError("ModifyDefinition reported failure.")
+    finally:
+        if accessed:
+            _release_selection_access(data)
+
+
+def _release_selection_access(data: Any) -> None:
+    try:
+        data.ReleaseSelectionAccess()
+    except Exception:
+        logger.warning("ReleaseSelectionAccess failed; the feature may be left in edit state.")
+
+
 def active_document() -> tuple[Any, Any]:
     app = running_app()
     doc = app.ActiveDoc
     if doc is None:
         raise RuntimeError("SOLIDWORKS has no active document. Create or open a part/assembly first.")
-    return app, flag_methods(doc, *_MODEL_DOC_METHODS)
+    try:
+        note_active_document(value(doc, "GetTitle"))
+    except Exception:
+        note_active_document(None)
+    return app, flag_methods(doc, *_MODEL_DOC_METHODS, *_registered(*_DOC_INTERFACES))
 
 
 def document_type(doc: Any) -> int:
@@ -557,6 +703,17 @@ def rebuild(doc: Any) -> bool:
         return bool(invoke_no_arg(doc, "EditRebuild3"))
     except Exception:
         return False
+
+
+def rebuild_detail(doc: Any) -> dict[str, Any]:
+    """Like rebuild(), but keep the raw EditRebuild3 return value and any exception text."""
+    try:
+        raw = invoke_no_arg(doc, "EditRebuild3")
+    except Exception as exc:
+        return {"ok": False, "raw": None, "error": f"{type(exc).__name__}: {exc}"}
+    if not isinstance(raw, (bool, int, float, str, type(None))):
+        raw = repr(raw)
+    return {"ok": bool(raw), "raw": raw, "error": None}
 
 
 def clear_selection(doc: Any) -> None:
@@ -631,6 +788,66 @@ def latest_sketch(doc: Any) -> tuple[str, Any]:
         raise RuntimeError("No sketch was found in the feature tree.")
     feature = sketches[-1]
     return str(feature_property(feature, "Name", "")), feature
+
+
+# Name of the sketch create_sketch / edit_sketch last opened.  Only a fallback
+# for open_sketch_name when COM identity matching cannot decide.
+_OPEN_SKETCH_HINT = ""
+_OPEN_SKETCH_HINT_DOC = ""
+
+
+def _doc_title(doc: Any) -> str:
+    return str(safe(doc, "GetTitle") or "") if doc is not None else ""
+
+
+def set_open_sketch_hint(name: str, doc: Any = None) -> None:
+    """Record the open sketch's name, keyed by document title so it cannot
+    leak into another document."""
+    global _OPEN_SKETCH_HINT, _OPEN_SKETCH_HINT_DOC
+    _OPEN_SKETCH_HINT = str(name or "")
+    _OPEN_SKETCH_HINT_DOC = _doc_title(doc)
+
+
+def same_com_object(a: Any, b: Any) -> bool:
+    """True when two late-bound wrappers refer to the same COM object.
+
+    Every property read can hand back a fresh wrapper, so ``is`` is not enough;
+    win32com's CDispatch compares by underlying interface pointer.
+    """
+    if a is None or b is None:
+        return False
+    if a is b:
+        return True
+    try:
+        return bool(a == b)  # CDispatch.__eq__ compares the underlying interface pointers
+    except Exception:
+        return False
+
+
+def open_sketch_name(doc: Any) -> tuple[str, Any]:
+    """Name and feature of the sketch that is open right now (field finding #7).
+
+    ISketch has no accessor back to its feature, and the open sketch is not
+    always the newest one (edit_sketch reopens an old one), so compare the open
+    ISketch with each sketch feature's GetSpecificFeature2.  If no identity
+    matches, use the name the last create_sketch/edit_sketch recorded, then the
+    newest sketch as before.
+    """
+    active = doc.SketchManager.ActiveSketch
+    sketches = sketch_features(doc)
+    if active is not None:
+        for feature in sketches:
+            try:
+                candidate = value(feature, "GetSpecificFeature2")
+            except Exception:
+                continue
+            if same_com_object(active, candidate):
+                return str(feature_property(feature, "Name", "")), feature
+    if _OPEN_SKETCH_HINT and _OPEN_SKETCH_HINT_DOC == _doc_title(doc):
+        for feature in sketches:
+            if str(feature_property(feature, "Name", "")) == _OPEN_SKETCH_HINT:
+                return _OPEN_SKETCH_HINT, feature
+    return latest_sketch(doc)
 
 
 def resolve_sketch(doc: Any, sketch_name: str | None) -> tuple[str, Any]:
@@ -1090,9 +1307,9 @@ def enumerate_sketch_segments(doc: Any, sketch_name: str | None = None) -> tuple
             raise RuntimeError("The drawing has no active sketch. Activate a view first.")
         resolved_name = "<active drawing view>"
     elif sketch is not None and not sketch_name:
-        # ISketch has no accessor back to its feature in this type library, and
-        # the open sketch is always the newest ProfileFeature in the tree.
-        resolved_name, _ = latest_sketch(doc)
+        # ISketch has no accessor back to its feature in this type library, so
+        # match it by COM identity (the newest sketch is wrong after edit_sketch).
+        resolved_name, _ = open_sketch_name(doc)
     else:
         resolved_name, feature = resolve_sketch(doc, sketch_name)
         sketch = value(feature, "GetSpecificFeature2")
@@ -1403,8 +1620,14 @@ def apply_selection(doc: Any, spec: dict[str, Any] | None, mark: int = 0, append
         index = int(raw_index)
         if not 0 <= index < len(bodies):
             raise RuntimeError(f"Body index {index} is out of range (0..{len(bodies) - 1}).")
-        if not select_object(doc, bodies[index], mark, True):
-            raise RuntimeError(f"Could not select body {index}.")
+        # Live 2017: IBody2.Select4 reports success but selects a different body (index 0 picked
+        # body 1 and vice versa) or refuses, so a part's bodies are picked by name as SOLIDBODY
+        # first; the object route stays as the fallback (assemblies, duplicate names).
+        body_name = str(safe(bodies[index], "Name", "") or "")
+        by_name = bool(body_name) and document_type(doc) == 1 and select_by_id(doc, body_name, "SOLIDBODY", mark, True, ext)
+        if not by_name and not select_object(doc, bodies[index], mark, True):
+            if not (body_name and select_by_id(doc, body_name, "SOLIDBODY", mark, True, ext)):
+                raise RuntimeError(f"Could not select body {index}.")
         count += 1
 
     if spec.get("components"):
@@ -1510,6 +1733,15 @@ def whats_wrong(doc: Any) -> list[dict[str, Any]]:
             }
         )
     return problems
+
+
+def whats_wrong_split(doc: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """whats_wrong() split into (errors, warnings) by its is_warning flag."""
+    entries = whats_wrong(doc)
+    return (
+        [p for p in entries if not p.get("is_warning")],
+        [p for p in entries if p.get("is_warning")],
+    )
 
 
 def feature_result(doc: Any, feature: Any, action: str, **data: Any) -> dict[str, Any]:

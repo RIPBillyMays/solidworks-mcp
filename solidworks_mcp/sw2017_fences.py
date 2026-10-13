@@ -35,7 +35,49 @@ FENCES: dict[str, str] = {
         "IDrawingDoc.AutoDimension is sketch-level auto-dimension in 2017 and adds no "
         "dimensions to a drawing view; use insert_model_annotations"
     ),
+    "combine_bodies": (
+        "IFeatureManager.InsertCombineFeature (and IPartDoc.InsertCombineFeature) return Nothing and "
+        "create no feature for every argument form tried (body objects, by-name selection, marks 0/1/2, "
+        "overlapping or touching bodies); use boss_extrude/cut_extrude with merge=true, or a "
+        "multi-body feature option, instead"
+    ),
+    "split_body": (
+        "IFeatureManager.PreSplitBody2 returns the two resulting temporary bodies, but PostSplitBody "
+        "creates no feature for any combination of consume flag, body subset, Origins or SavePaths "
+        "(verified live); cut the body with cut_extrude or a plane-aligned sketch instead"
+    ),
+    "set_mass_override": (
+        "IMassProperty.OverrideMass only sets UserAssigned; Mass is unchanged on the same and on a "
+        "fresh calculation object (verified live), and 2017 has no density setter; set the material "
+        "or a custom property instead"
+    ),
+    "redo": (
+        "EditRedo2 and EditRedo are accepted but restore nothing after API-driven changes "
+        "(verified live); recreate the feature instead"
+    ),
 }
+
+FENCES["sheet_metal_sketched_bend"] = (
+    "IFeatureManager.CreateDefinition(swFmSketchBend) returns Nothing on 2017 (verified live), so no "
+    "sketched-bend definition can be built; use sheet_metal_edge_flange or fold/unfold instead"
+)
+
+FENCES["surface_trim"] = (
+    "IFeatureManager.PreTrimSurface succeeds but PostTrimSurface returns Nothing and trims nothing for "
+    "every mark combination and argument form tried (verified live); use surface_knit or cut the "
+    "thickened body instead"
+)
+
+FENCES["linear_component_pattern"] = (
+    "IFeatureManager.FeatureLinearPattern5 in an assembly returns Nothing and creates no pattern for "
+    "every mark and argument form tried, with the selection read back correct (verified live); use "
+    "pattern_driven_component_pattern or insert_component repeatedly instead"
+)
+FENCES["circular_component_pattern"] = (
+    "IFeatureManager.FeatureCircularPattern5 in an assembly returns Nothing and creates no pattern for "
+    "every mark value tried, with the selection read back correct (verified live); use "
+    "pattern_driven_component_pattern or insert_component + rotate_component instead"
+)
 
 PREFIX = "NOT SUPPORTED ON SOLIDWORKS 2017: "
 

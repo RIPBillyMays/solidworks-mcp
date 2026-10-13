@@ -6,7 +6,7 @@ Last updated: 2026-10-08 (Phase 5a). Three clients are registered against the sa
 - Claude Desktop (app)
 - Codex CLI
 
-Server executable (all three use it, with no arguments and no environment variables):
+Server executable (all three use it, with no arguments). Claude Code and Claude Desktop also set `SW_MCP_OUTPUT_ROOT=C:\_Projects\solidworks-mcp\sandbox` (added 2026-10-10). Without it, saves default to `~\Documents\solidworks-mcp` and anything under `sandbox\` is refused:
 
 ```
 C:\_Projects\solidworks-mcp\.venv\Scripts\solidworks-mcp.exe
@@ -28,6 +28,17 @@ Read this before you ask any client to do real work.
 - [ ] Know the broken tools. Until Phase 2 lands, some tools fail or misbehave. The list is in `docs/PLAN.md` under "⚠️ Using the clients before Phases 2–4". Do not rely on those tools yet.
 - [ ] Be at the keyboard so you can dismiss a dialog if a call hangs.
 - [ ] Start with `solidworks_status` ("what SOLIDWORKS version and document are you attached to?") before anything that changes a model.
+
+### Working on CAD that lives in another repo (field finding #21)
+
+The server only reads and writes files under its **output root** (ADR-0005). Anything else is refused, on purpose, so a project that keeps its CAD in its own repo cannot be saved to in place. The workflow is copy in, work, copy back:
+
+1. Copy the files you want to work on from the project repo into the output root (for this repo, `C:\_Projects\solidworks-mcp\sandbox\<project>\`). For an assembly, copy the whole folder tree so the references still resolve.
+2. Open and edit the copies through the MCP tools. Saves, exports and `save_as` all go under the output root.
+3. Review the result (feature tree, mass, screenshot), then copy the changed files back into the project repo yourself and commit them there. The server never writes outside the output root, so this step is always a manual or separate-tool copy.
+4. Delete the copies from `sandbox\` when you are done (it is gitignored, so it never reaches either repo).
+
+**`SW_MCP_OUTPUT_ROOT`** sets the output root. The code default (`OUTPUT_ROOT` in `solidworks_mcp/sw_core.py`) is `~\Documents\solidworks-mcp`, that is `C:\Users\<you>\Documents\solidworks-mcp`, when the variable is unset or empty. For this repo set it to `C:\_Projects\solidworks-mcp\sandbox` (Claude Code and Claude Desktop are already configured that way). One root only: a list of allowed roots is not supported. Screenshots kept with `capture_screenshot save_as` land in `<output root>\screenshots\`.
 
 ### About rules and instructions files
 
@@ -85,7 +96,10 @@ To pause it without removing, use `/mcp` inside a session and disable the server
   "mcpServers": {
     "solidworks": {
       "command": "C:\\_Projects\\solidworks-mcp\\.venv\\Scripts\\solidworks-mcp.exe",
-      "args": []
+      "args": [],
+      "env": {
+        "SW_MCP_OUTPUT_ROOT": "C:\\_Projects\\solidworks-mcp\\sandbox"
+      }
     }
   }
 }
@@ -93,7 +107,18 @@ To pause it without removing, use `/mcp` inside a session and disable the server
 
 JSON needs doubled backslashes in the path, as shown.
 
-**Backup:** the file as it was before the edit is saved next to it as `claude_desktop_config.json.bak-2026-10-08`. Restoring that copy removes the SOLIDWORKS entry, but also reverts any other change Desktop has made to the file since.
+**Why the key kept disappearing (diagnosed 2026-10-11):** Desktop (MSIX install, `Claude_pzs8sxrjxfjjc`) holds this file in memory and rewrites the *whole* file on every session/connector change. `%LOCALAPPDATA%\Claude\Logs\main.log` shows `Config file written` several times a minute. Any edit made **while Desktop is running** is overwritten by its stale copy. (Desktop's logs moved from `%APPDATA%\Claude\logs` to `%LOCALAPPDATA%\Claude\Logs` in Sept 2026.) A key that is present **at startup** is kept on later writes; that's why T5a passed on 2026-10-08. There is no MSIX redirect (the package `LocalCache\Roaming` has no `Claude` folder) and no org policy involved. The only other config, `%APPDATA%\Claude-3p\`, is for third-party/enterprise mode and isn't used.
+
+**Supported fix:** edit only while Desktop is fully quit. Use the script, which refuses to run while Desktop is up, backs up the file, merges the entry and writes UTF-8 without a BOM:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\_Projects\solidworks-mcp\tools\compat\register_claude_desktop.ps1
+powershell -ExecutionPolicy Bypass -File C:\_Projects\solidworks-mcp\tools\compat\register_claude_desktop.ps1 -Check
+```
+
+Run it from a plain PowerShell window, not from a terminal inside Claude Desktop, because quitting Desktop kills that terminal.
+
+**Backup:** the file as it was before the original edit is saved next to it as `claude_desktop_config.json.bak-2026-10-08`. Restoring that copy removes the SOLIDWORKS entry, but also reverts any other change Desktop has made to the file since.
 
 **Restart needs:** Claude Desktop only reads this file at startup. **Fully quit the app (right-click the tray icon, Quit; closing the window is not enough) and start it again.** This has not been done as part of Phase 5a. Until you restart, Desktop does not know about the server.
 
@@ -102,7 +127,7 @@ JSON needs doubled backslashes in the path, as shown.
 - Settings > Developer lists `solidworks` as running (no error badge).
 - In a new chat, the tools/connectors menu shows `solidworks` with its tools.
 - Ask: "Call solidworks_status and show me the raw result." With SOLIDWORKS closed you should get "No running SOLIDWORKS session is available." That counts as a pass.
-- If it fails to start, the MCP log is in `%APPDATA%\Claude\logs\` (look for `mcp-server-solidworks.log`).
+- If it fails to start, the MCP log is in `%LOCALAPPDATA%\Claude\Logs\` (look for `mcp-server-solidworks.log`).
 
 **Disable or remove:** delete the `solidworks` entry from `mcpServers` (keep the JSON valid: no trailing comma), then restart Desktop. Or restore the backup file as described above.
 
