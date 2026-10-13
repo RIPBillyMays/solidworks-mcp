@@ -81,7 +81,7 @@ Seeded 2026-10-08 from Zach's stated goals and common SOLIDWORKS design-intent p
 - **Why:** Phase 5 T5: indices moved after the cut, and the body was renamed "CenterHole". *(proposed, 2026-10-10)*
 
 ## Field-use candidates (2026-10-12)
-Source: a multi-part build driven from another project (`docs/handoff/2026-10-12-01-mcp-field-findings.md`). All are *proposed*.
+Source: a multi-part build driven from another project (`docs/handoff/2026-10-12-01-mcp-field-findings.md`). All seven were **confirmed** by Zach at 🧑 G5 (2026-10-13) as soft rules; like R-009 they become active when the Phase 6 rulebook ships. R-013 remains a hard-gate candidate.
 
 ### R-012: Shared frame for multi-part products
 - **Enforcement:** soft

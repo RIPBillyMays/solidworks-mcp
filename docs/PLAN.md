@@ -12,8 +12,8 @@
 | 2 | Static 2017 compatibility gate | ✅ done 2026-10-08 (merged to `main`) | 🧪 T2 ✅ (74 tests; `docs/reports/phase2-verification.md`) |
 | 3 | Live smoke test on SW 2017 | ✅ done 2026-10-08 (merged to `main`) | 🧑 G2 ✅ · 🧪 T3 ✅ (`docs/reports/phase3-live-matrix.md`, `phase3-verification.md`) · 🧑 G3 ✅ Go (2026-10-08) |
 | 4 | Fix or fence failing tools | ✅ done 2026-10-09 (merged to `main`; ADR-0006; fenced: `auto_dimension_view`) | 🧪 T4 ✅ (100 PASS, 1 FENCED, 2 UNVERIFIED; 102 unit tests) · 🧑 G4 ✅ (2026-10-09; R-009 confirmed; drawings deferred) |
-| 5 | Connect AI clients + first guided session | ⏳ **next** (3D only) | 🧪 T5 · 🧑 G5 |
-| 6 | Rulebook v0 ("the brain") | ⏳ | 🧪 T6 · 🧑 G6 |
+| 5 | Connect AI clients + first guided session | ✅ done 2026-10-13 (merged to `main`; 21 field findings fixed; `docs/reports/phase5-mcp-smoke-postfix.md`) | 🧪 T5 ✅ · 🧑 G5 ✅ (2026-10-13; field use counted as 5.4; R-012…R-018 confirmed) |
+| 6 | Rulebook v0 ("the brain") | ⏳ **next** | 🧪 T6 · 🧑 G6 |
 | 7 | Hardening and upkeep | ⏳ | 🧑 G7 |
 | ∞ | Rules learning loop | ongoing after G5 | per session |
 
@@ -130,6 +130,7 @@ For each FAIL, SILENT-FAIL or HANG:
 
 🧪 **T5:** each client lists the tools and completes "50×30×10 mm block with a Ø10 mm through-hole, centered". Expected volume: 15000 − π·5²·10 ≈ 14214.6 mm³.
 🧑 **G5:** Zach's hands-on review. Harvest the first rule candidates into `rules/candidates.md`.
+- ✅ **G5 passed 2026-10-13.** Zach counted the 2026-10-12 field use as the guided session (5.4), confirmed R-012…R-018 as soft rules (R-013 stays a hard-gate candidate for Phase 6), and approved the merge. Evidence: `docs/reports/phase5-*`, final MCP-level smoke run `phase5-mcp-smoke-postfix.md` (all PASS).
 🔁 Handoff.
 
 ## Phase 6: Rulebook v0, "the brain" (ADR-0004)
